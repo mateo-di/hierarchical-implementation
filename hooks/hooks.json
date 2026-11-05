@@ -1,0 +1,29 @@
+{
+  "description": "Delegation gate for the hierarchical-implementation skill: decide before the main thread edits, hold each decision to its scope, log worker spawns and messages.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Monitor|Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/hierarchical-implementation-gate.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|Task|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/hierarchical-implementation-gate.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
