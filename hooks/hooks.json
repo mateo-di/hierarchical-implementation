@@ -3,12 +3,12 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Agent|Task",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Monitor|Agent|Task",
         "hooks": [
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/hierarchical-implementation-gate.sh\"",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

@@ -11,7 +11,17 @@ claude plugin install hierarchical-implementation@hierarchical-implementation
 
 Then merge [examples/CLAUDE.md](examples/CLAUDE.md) into `~/.claude/CLAUDE.md`. It holds the policy row the skill and the hook refer to, including the standing authorization for editing workers. Hooks load when a session starts, so restart open sessions.
 
-Requirements: Claude Code with the Agent and SendMessage tools, `bash`, `git`, `jq`.
+Requirements: Claude Code with the Agent and SendMessage tools, `bash` 3.2 or newer, `git`, `jq`.
+
+### Upgrading from a manual install
+
+Earlier versions were copied into `~/.claude` by hand. Remove those copies, or two gates with different rules will run side by side:
+
+- `~/.claude/skills/hierarchical-implementation/`
+- `~/.claude/hooks/hierarchical-implementation-gate.sh` and its `.test.sh`
+- In `~/.claude/settings.json`: the PreToolUse entry that runs that hook, and the `hierarchical-implementation-gate.sh decide` allow rules. The plugin's hook approves its own `decide` command, so it doesn't need them.
+
+Existing decisions and logs under `~/.local/state/claude-gates/` keep working.
 
 ## How it works
 
@@ -32,12 +42,12 @@ There are three layers.
 - **The first edit.** In a worktree under `HIERARCHICAL_GATE_ROOT`, the main thread's first edit is denied until the session records a decision. The deny reason works as a just-in-time prompt: Claude reads it at the moment it wants to edit. It carries the ready-to-run `decide` commands, the exemption list and the review loop. Subagents are never gated.
 - **Recording a decision.** The hook approves its own `decide` command, but only in its exact form with inert arguments, so recording costs no permission prompt. Each decision is appended to a log.
 - **Each decision is held to its scope:**
-  - `delegate`: the driver's edits are denied until a worker has been spawned in the session. After that they count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
+  - `delegate`: the driver's edits are denied until it has spawned a named worker that can edit. Read-only `Explore` and `Plan` agents don't count. After that, the driver's own edits count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
   - `trivial`: one file, up to a cap of changed lines.
   - `security`: only the files named when it was recorded. "Security" means the agent's own controls (hooks, gates, agent settings and permissions, `CLAUDE.md`, `AGENTS.md`, skill and agent definitions) or secret values. Repo ownership, CI and IAM files go to workers.
   - `lane`, `opt-out`, `no-subagents`: the whole worktree.
-- **Shell writes** through `>`, `>>`, `tee`, `sed -i` and `perl -i` go through the same rules as edits.
-- **Named worker calls** (`Agent` with `name`) must set `model`.
+- **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
+- **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root.
 - **Logging.** Worker spawns and `SendMessage` calls are logged.
 
 ```bash
@@ -47,7 +57,9 @@ hierarchical-implementation-gate.sh decide <worktree> <session> direct "security
 hierarchical-implementation-gate.sh report
 ```
 
-`report` prints each session's decision with its spawn and message counts. A run of `delegate` sessions with no messages suggests reviews that never sent a correction.
+The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cache/`. Recording a decision again resets which file `trivial` covers and adds files to `security`. It keeps the `delegate` budget, so recording `delegate` again does not refill it.
+
+`report` prints each session's decisions with its spawn and message counts. `delegate` sessions with spawns but no messages suggest reviews that never sent a correction.
 
 ## Configuration
 
@@ -71,21 +83,22 @@ bash hooks/hierarchical-implementation-gate.test.sh
 
 ## What it does not enforce
 
-- **Whether a review was critical.** The log shows messages were sent, not whether they were right.
-- **Unit boundaries.** A spawned worker can still edit outside the files it owns. The skill has the driver check `git diff --name-only`.
-- **Uncommon shell writes.** `cp`, `mv`, `patch`, `git apply`, scripts, and redirects without a space before the target are not recognized. Shell writes under `delegate` don't count against the budget.
+- **Whether a review was critical.** The log shows that messages were sent, not whether they were right.
+- **Which worktree a worker serves.** Any named editing worker spawned in the session satisfies `delegate`, including one spawned for another worktree. A spawned worker can also edit outside the files it owns; the skill has the driver check `git diff --name-only`.
+- **Other shell writes.** `cp`, `mv`, `patch`, `git apply`, scripts, writes inside `$(...)`, and targets built from variables other than `$HOME` are not recognized. Writes other than heredocs have no known size, so they don't count against the budget or the trivial cap. A command that writes more than 20 files is denied.
+- **Repeated decisions.** Recording `trivial` again frees its file for a new task. The log shows every repeat.
 - **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows.
-- **Errors.** It fails open on any resolution error.
+- **Errors and timeouts.** The hook fails open on any resolution error. If it takes longer than its timeout, Claude Code lets the call through. Commands of about 20 KB take around half a second.
 
 ## Background
 
-Before this version, two weeks of use logged 106 decisions: 26 `delegate`, 39 `trivial`, 32 `security`, 3 `lane`, and 6 from an older rule that let coupling count as an exemption.
+The first published version only checked that a decision was recorded. The author's log at that point held 106 decisions: 26 `delegate`, 39 `trivial`, 32 `security`, 3 `lane`, and 6 recorded under older exemption names. A few of the rows are the same conversation recorded twice under two session ids.
 
-One long session showed what the old rules missed:
-- It recorded `security` for four worktrees within seconds and then wrote their docs, tests and templates directly.
-- It recorded `delegate`, then made dozens of authoring edits itself.
+One long session showed two gaps:
+- It recorded `security` for three worktrees within 3 seconds, then wrote their IAM, CI workflow and docs changes itself.
+- It made 22 edits to one spec file under a single `trivial` decision.
 
-Named files for `security`, the spawn requirement and the integration budget come from that session.
+Named files for `security` and the line cap for `trivial` come from that session. The spawn requirement and the integration budget close the gap where `delegate` was taken on trust. The log has no case of `delegate` being abused.
 
 ## License
 

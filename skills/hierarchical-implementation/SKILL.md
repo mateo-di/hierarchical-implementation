@@ -78,10 +78,11 @@ agent's model, and confirm the actual model in `/tasks` when possible.
 The `hierarchical-implementation-gate.sh` hook denies the main thread's first edit in a
 `~/vscode` worktree until the session records `delegate` or a `direct` exemption with the
 `decide` command its message prints, which the hook approves itself. It then holds each
-decision to its scope: under `delegate` the driver edits only after a worker was spawned and
-only up to an integration budget of changed lines; `trivial` covers one file and a line cap;
-`security` covers the files it names. It applies the same rules to shell writes it recognizes
-(`>`, `tee`, `sed -i`, `perl -i`), requires `model` on named worker calls, and logs spawns
-and SendMessage calls, which its `report` command summarizes per session. It cannot classify
+decision to its scope: under `delegate` the driver edits only after it spawned a named
+worker that can edit, and only up to an integration budget of changed lines; `trivial`
+covers one file and a line cap; `security` covers the files it names. It applies the same
+rules to the shell writes it recognizes in Bash and Monitor commands (`>`, `>>`, `tee`,
+`sed -i`, `perl -i`), requires `model` on named worker calls, and logs spawns and
+SendMessage calls, which its `report` command summarizes per session. It cannot classify
 work or judge whether a review was critical. This skill and project rules do not override
 user instructions or the harness.
