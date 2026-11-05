@@ -1,51 +1,53 @@
 # hierarchical-implementation
 
-A Claude Code skill and PreToolUse hook that make worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result, sends corrections to the same worker, and integrates. The hook stops the main session's first edit in a repo until it records whether it will delegate or which exemption lets it work directly.
-
-## How it works
-
-Three layers work together, and only the first edit is enforced by code.
-
-1. **Policy** ([examples/CLAUDE.md](examples/CLAUDE.md)). A `CLAUDE.md` row makes delegation the default for anything beyond a trivial edit and gives standing authorization for editing workers, so Claude does not stop to ask before spawning one. It also lists the exemptions.
-2. **Procedure** ([skills/hierarchical-implementation/SKILL.md](skills/hierarchical-implementation/SKILL.md)). The skill covers how to split work into units (one coupled change is one unit), what goes into a brief, how to isolate workers in their own worktrees and branches, how to review, the correction loop through `SendMessage` (at most three rounds per unit), and integration.
-3. **Forcing function** ([hooks/hierarchical-implementation-gate.sh](hooks/hierarchical-implementation-gate.sh)). A PreToolUse hook on `Edit|Write|MultiEdit|NotebookEdit`.
-
-### The hook
-
-1. Subagent edits pass. Their hook input carries `agent_id`.
-2. Paths outside `HIERARCHICAL_GATE_ROOT` (default `~/vscode`) pass. So do worktree paths outside a plain character set, because the deny text embeds the path in a command.
-3. The hook looks for a decision keyed by the session id and a hash of the worktree's git dir. If there is none, it denies the edit.
-4. The deny reason is the main trick. Claude reads it at the exact moment it wants to edit, so it works as a just-in-time prompt instead of a rule buried far back in context. It carries the ready-to-run `decide` commands for both paths, the instruction to load the skill, a summary of the review loop, and the exemption list.
-5. Claude records a decision with the `decide` command. Allowlisting that command in `settings.json` means recording costs no permission prompt, but Claude still has to write a reason of at least three words. Each decision is appended to a TSV log for later review.
-6. After a decision:
-   - `delegate` and every exemption except `trivial` lift the gate for that session and worktree. The driver still edits to integrate.
-   - `trivial` allows exactly one file. A second file is denied with "the task is not trivial".
-
-```bash
-hierarchical-implementation-gate.sh decide <worktree> <session> delegate "<units, three or more words>"
-hierarchical-implementation-gate.sh decide <worktree> <session> direct "<exemption>: <why, three or more words>"
-```
-
-Exemptions: `trivial` (one file, a few lines), `security` (security, credential, permission, hook, gate, settings or `CLAUDE.md` changes, never delegated), `lane` (a coordinator session spawned this one to execute a unit it reviews), `opt-out` (the user or the repo's rules say not to delegate), `no-subagents` (the harness has no subagent tool). Coupling is not an exemption.
-
-## Requirements
-
-- Claude Code with the Agent and SendMessage tools
-- `bash`, `git`, `jq`
+A Claude Code plugin that makes worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result critically, sends corrections to the same worker, and integrates. A hook holds the driver to that: it must decide before its first edit, and each decision only allows what it claims.
 
 ## Install
 
 ```bash
-git clone https://github.com/mateo-di/hierarchical-implementation
-cp -r hierarchical-implementation/skills/hierarchical-implementation ~/.claude/skills/
-cp hierarchical-implementation/hooks/hierarchical-implementation-gate.sh ~/.claude/hooks/
-chmod +x ~/.claude/hooks/hierarchical-implementation-gate.sh
+claude plugin marketplace add mateo-di/hierarchical-implementation
+claude plugin install hierarchical-implementation@hierarchical-implementation
 ```
 
-Then:
+Then merge [examples/CLAUDE.md](examples/CLAUDE.md) into `~/.claude/CLAUDE.md`. It holds the policy row the skill and the hook refer to, including the standing authorization for editing workers. Hooks load when a session starts, so restart open sessions.
 
-1. Merge [examples/settings.json](examples/settings.json) into `~/.claude/settings.json`. Replace `/home/you` in the allowlist with your home directory. The deny text prints the hook's absolute path, so the absolute form is the one that matches.
-2. Merge [examples/CLAUDE.md](examples/CLAUDE.md) into `~/.claude/CLAUDE.md`.
+Requirements: Claude Code with the Agent and SendMessage tools, `bash`, `git`, `jq`.
+
+## How it works
+
+There are three layers.
+
+1. **Policy** ([examples/CLAUDE.md](examples/CLAUDE.md)). Delegation is the default for anything beyond a trivial edit, and Claude does not ask before spawning editing workers.
+2. **Procedure** ([skills/hierarchical-implementation/SKILL.md](skills/hierarchical-implementation/SKILL.md)). The skill covers:
+   - splitting work into units, one todo per unit (a coupled change is one unit);
+   - what goes into a brief;
+   - isolating workers in their own worktrees and branches;
+   - critical review: accept, correct or redo;
+   - corrections through `SendMessage`, at most three rounds per unit;
+   - integration.
+3. **Enforcement** ([hooks/hierarchical-implementation-gate.sh](hooks/hierarchical-implementation-gate.sh), registered by [hooks/hooks.json](hooks/hooks.json)).
+
+### The hook
+
+- **The first edit.** In a worktree under `HIERARCHICAL_GATE_ROOT`, the main thread's first edit is denied until the session records a decision. The deny reason works as a just-in-time prompt: Claude reads it at the moment it wants to edit. It carries the ready-to-run `decide` commands, the exemption list and the review loop. Subagents are never gated.
+- **Recording a decision.** The hook approves its own `decide` command, but only in its exact form with inert arguments, so recording costs no permission prompt. Each decision is appended to a log.
+- **Each decision is held to its scope:**
+  - `delegate`: the driver's edits are denied until a worker has been spawned in the session. After that they count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
+  - `trivial`: one file, up to a cap of changed lines.
+  - `security`: only the files named when it was recorded. "Security" means the agent's own controls (hooks, gates, agent settings and permissions, `CLAUDE.md`, `AGENTS.md`, skill and agent definitions) or secret values. Repo ownership, CI and IAM files go to workers.
+  - `lane`, `opt-out`, `no-subagents`: the whole worktree.
+- **Shell writes** through `>`, `>>`, `tee`, `sed -i` and `perl -i` go through the same rules as edits.
+- **Named worker calls** (`Agent` with `name`) must set `model`.
+- **Logging.** Worker spawns and `SendMessage` calls are logged.
+
+```bash
+hierarchical-implementation-gate.sh decide <worktree> <session> delegate "<units>"
+hierarchical-implementation-gate.sh decide <worktree> <session> direct "<exemption>: <why>"
+hierarchical-implementation-gate.sh decide <worktree> <session> direct "security: <why>" <file>...
+hierarchical-implementation-gate.sh report
+```
+
+`report` prints each session's decision with its spawn and message counts. A run of `delegate` sessions with no messages suggests reviews that never sent a correction.
 
 ## Configuration
 
@@ -53,10 +55,13 @@ Then:
 |---|---|---|
 | `HIERARCHICAL_GATE_ROOT` | `~/vscode` | Only paths under this directory are gated |
 | `HIERARCHICAL_GATE` | `on` | `off` disables the hook |
-| `XDG_STATE_HOME` | `~/.local/state` | Decisions live under `$XDG_STATE_HOME/claude-gates/delegation/` |
-| `DELEGATION_LOG` | `$XDG_STATE_HOME/claude-gates/delegation-decisions.tsv` | Append-only log: time, session, worktree, choice, reason |
+| `TRIVIAL_MAX_LINES` | `20` | Changed-line cap for a trivial exemption |
+| `INTEGRATE_MAX_LINES` | `60` | Driver's changed-line budget per worktree under delegate |
+| `XDG_STATE_HOME` | `~/.local/state` | Per-session state lives under `$XDG_STATE_HOME/claude-gates/delegation/` |
+| `DELEGATION_LOG` | `…/claude-gates/delegation-decisions.tsv` | Decisions: time, session, worktree, choice, reason, named files |
+| `DELEGATION_EVENTS` | `…/claude-gates/delegation-events.tsv` | Spawns and messages: time, session, kind, target, model, agent type |
 
-To change the root, set it in the hook command, for example `HIERARCHICAL_GATE_ROOT="$HOME/src" "$s"`.
+Set these in the environment Claude Code starts with.
 
 ## Tests
 
@@ -64,34 +69,23 @@ To change the root, set it in the hook command, for example `HIERARCHICAL_GATE_R
 bash hooks/hierarchical-implementation-gate.test.sh
 ```
 
-The suite builds a throwaway repo and linked worktree, feeds the hook synthetic payloads and drives the `decide` CLI (31 cases).
-
 ## What it does not enforce
 
-- **`delegate` is on the honor system.** It unlocks every edit in the worktree for the driver, and nothing checks that a worker was ever spawned.
-- **Shell edits bypass the gate entirely.** That includes `sed`, heredocs and `tee`. The "do not edit through the shell" line in the deny text is only text.
-- **`security` has no limit and Claude classifies it itself.** It covers any number of files.
-- **`trivial` is only half checked.** The one-file limit is enforced, but "a few lines" is not.
-- **Everything after the first edit is prose.** That covers the review loop, the corrections, the three-round cap and the model choice.
-- **It fails open** on any resolution error, including a state dir it cannot write.
+- **Whether a review was critical.** The log shows messages were sent, not whether they were right.
+- **Unit boundaries.** A spawned worker can still edit outside the files it owns. The skill has the driver check `git diff --name-only`.
+- **Uncommon shell writes.** `cp`, `mv`, `patch`, `git apply`, scripts, and redirects without a space before the target are not recognized. Shell writes under `delegate` don't count against the budget.
+- **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows.
+- **Errors.** It fails open on any resolution error.
 
-So the gate guarantees Claude makes a deliberate, logged decision before its first edit, with the default tilted toward delegating. It does not guarantee the decision is correct or that workers actually run. The decision log is there so you can check.
+## Background
 
-## Observed usage
+Before this version, two weeks of use logged 106 decisions: 26 `delegate`, 39 `trivial`, 32 `security`, 3 `lane`, and 6 from an older rule that let coupling count as an exemption.
 
-Over two weeks of daily use the log recorded 106 decisions:
-- `delegate`: 26 (25%)
-- `trivial`: 39
-- `security`: 32
-- `lane`: 3
-- older "coupled unit" exemptions: 6, all from before coupling stopped counting as an exemption
+One long session showed what the old rules missed:
+- It recorded `security` for four worktrees within seconds and then wrote their docs, tests and templates directly.
+- It recorded `delegate`, then made dozens of authoring edits itself.
 
-`security` was mostly ownership files such as `CODEOWNERS`, CI permissions and IAM changes, plus some merge-conflict resolutions in those files.
-
-## Notes
-
-- The skill also mentions a `/repro` gate and its `repro-gate.sh` hook. That gate blocks source edits until a bug is reproduced, and it is not part of this repo. The references are harmless without it.
-- The skill suggests Claude Opus for the driver and Claude Sonnet for editing workers. It asks before switching the main session's model.
+Named files for `security`, the spawn requirement and the integration budget come from that session.
 
 ## License
 

@@ -1,0 +1,9 @@
+{
+  "name": "hierarchical-implementation",
+  "version": "1.0.0",
+  "description": "Make worker subagents the default for implementation: the main session briefs, reviews critically, sends corrections and integrates, and a hook holds every direct-work exemption to its scope.",
+  "author": {
+    "name": "mateo-di",
+    "url": "https://github.com/mateo-di"
+  }
+}

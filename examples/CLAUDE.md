@@ -4,7 +4,7 @@
 
 | Task | Agent | Why |
 |------|-------|-----|
-| Implementation beyond a trivial edit | `hierarchical-implementation` skill | Default, with standing authorization for editing workers: named workers execute, one per unit (a coupled change is one unit); the main session briefs, reviews, sends corrections to the same worker for up to three rounds, and integrates. Work directly only when the whole task is a trivial edit (one file), a lane a coordinator spawned to execute a unit it reviews, an opt-out, or in a harness without subagents; security, credential, permission, hook, gate, settings and CLAUDE.md changes are never delegated; workers spawn no agents |
+| Implementation beyond a trivial edit | `hierarchical-implementation` skill | Default, with standing authorization for editing workers: named workers execute, one per unit (a coupled change is one unit); the main session briefs, reviews, sends corrections to the same worker for up to three rounds, and integrates. Work directly only when the whole task is a trivial edit (one file, a few lines), a lane a coordinator spawned to execute a unit it reviews, an opt-out, or in a harness without subagents; changes to the agent's own controls (hooks, gates, agent settings and permissions, CLAUDE.md, AGENTS.md, skill and agent definitions) or to secret values are never delegated and cover only the files named; repo ownership, CI and IAM files go to workers; workers spawn no agents |
 
 - **The writer is not the verifier.** For PR-bound work, the final check runs in a fresh subagent that did not write the code and gets only the success criteria and the branch, because an author checks what it meant to build. For wide or risky changes, add a second model family through the codex CLI (`codex exec --sandbox read-only`); if it is unavailable, use a fresh subagent on a different Claude model and say so.
 
@@ -39,4 +39,4 @@ git -C ~/vscode/my-repo worktree add ~/vscode/my-repo/.worktrees/agent3 -b agent
 
 | Rule | Enforced by |
 |---|---|
-| Record delegate or a direct exemption before the main session's first edit in a `~/vscode` worktree; a trivial exemption covers one file | `hierarchical-implementation-gate.sh` (Edit/Write only; logs each decision). The worker review loop itself is prose only |
+| Record delegate or a direct exemption before the main session's first edit in a `~/vscode` worktree; delegate needs a spawned worker and keeps the driver to an integration budget; trivial covers one file and a line cap; security covers the files it names; named workers carry a model | `hierarchical-implementation-gate.sh` from the hierarchical-implementation plugin (edits plus recognized shell writes; logs decisions, spawns and messages). Whether a review is critical is prose only |

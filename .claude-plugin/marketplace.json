@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hierarchical-implementation",
+  "description": "Worker-subagent-by-default implementation for Claude Code: a skill plus a delegation gate hook.",
+  "owner": {
+    "name": "mateo-di",
+    "url": "https://github.com/mateo-di"
+  },
+  "plugins": [
+    {
+      "name": "hierarchical-implementation",
+      "description": "Make worker subagents the default for implementation: the main session briefs, reviews critically, sends corrections and integrates, and a hook holds every direct-work exemption to its scope.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
