@@ -16,13 +16,13 @@
 # the driver touches. Delegate sums the driver's own edit payloads, because workers edit the same
 # worktree and git cannot tell their lines apart; an edit that later fails still counts.
 #
-# PreToolUse on Edit|Write|MultiEdit|NotebookEdit gates edits. On Bash and Monitor it applies the
-# same gate to the files a command writes through redirects, tee, sed -i or perl -i, found by a
-# quote-aware tokenizer. Other shell writes (cp, mv, patch, scripts, writes inside $(...)) are not
-# recognized, and only heredoc bodies give a shell write a size. On Bash it also approves this
-# script's own decide command, so recording costs no permission prompt. On Agent|Task, in a session
-# the gate has seen, it requires model on named workers. PostToolUse on Agent|Task|SendMessage logs
-# spawns and messages to DELEGATION_EVENTS, which the delegate rule and the report command read.
+# Before a tool runs (hooks/hooks.json lists which), the hook gates file edits and the shell writes
+# shell_targets recognizes, approves this script's own decide command so recording costs no
+# permission prompt, and requires a model on named workers in sessions it has seen. After an agent
+# spawn or a message it logs the event to DELEGATION_EVENTS, which delegate and report read.
+#
+# It is a speed bump that makes skipping delegation a deliberate, logged act, not a barrier: a model
+# set on getting around it can write files in ways it does not see.
 #
 # Only paths under HIERARCHICAL_GATE_ROOT (~/vscode, where implementation repos live) are gated.
 # State lives under <state dir>/delegation/<session>/<digest of the worktree's git dir>, in files
@@ -43,6 +43,8 @@ GIT_BIN="${GIT_BIN:-git}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-gates"
 DELEGATION_LOG="${DELEGATION_LOG:-$STATE_DIR/delegation-decisions.tsv}"
 DELEGATION_EVENTS="${DELEGATION_EVENTS:-$STATE_DIR/delegation-events.tsv}"
+# A trivial change is one a driver would not brief a worker for; integration leaves room for review
+# fixups and merge resolution, not for a unit's worth of new code.
 TRIVIAL_MAX_LINES="${TRIVIAL_MAX_LINES:-20}"
 INTEGRATE_MAX_LINES="${INTEGRATE_MAX_LINES:-60}"
 MAX_TARGETS=20 # distinct files one shell command may write; more is denied, which bounds the hook's run time
@@ -59,17 +61,44 @@ FD_DUP='^([0-9]+-?|-)$'
 SED_INPLACE='^-[a-zA-Z]*i'
 US=$'\x1f'
 
+git_() { # git without core.fsmonitor, which would run a command from a .git/config the gate cannot protect
+  "$GIT_BIN" -c core.fsmonitor=false "$@"
+}
+
 state_base() { # state_base <session> <path-in-worktree> -> <state dir>/delegation/<session>/<digest of the worktree git dir>
   local d h
   [[ $1 =~ $SID ]] || return 1
-  d=$("$GIT_BIN" -C "$2" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  h=$(printf '%s' "$d" | "$GIT_BIN" hash-object --stdin 2>/dev/null) && [[ -n $h ]] || return 1
+  d=$(git_ -C "$2" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  h=$(printf '%s' "$d" | git_ hash-object --stdin 2>/dev/null) && [[ -n $h ]] || return 1
   printf '%s/delegation/%s/%s' "$STATE_DIR" "$1" "$h"
 }
 
-resolve() { # resolve <path> <base dir>: sets path (absolute, existing directories made physical) and real (its nearest existing directory)
-  local p=$1 parent d
+normalize() { # normalize <absolute path> -> the path without . and .. segments, removed lexically the way the edit tools resolve them
+  local rest=${1#/} part IFS
+  local -a kept=()
+  while [[ -n $rest ]]; do
+    part=${rest%%/*}
+    if [[ $rest == */* ]]; then rest=${rest#*/}; else rest=""; fi
+    case $part in
+      '' | .) ;;
+      ..) ((${#kept[@]})) && unset "kept[${#kept[@]}-1]" ;;
+      *) kept[${#kept[@]}]=$part ;;
+    esac
+  done
+  IFS=/
+  printf '/%s' "${kept[*]}"
+}
+
+resolve() { # resolve <path> <base dir>: sets path (absolute, normalized, existing directories and a symlinked file made physical) and real (its nearest existing directory)
+  local p=$1 parent d link hops=0
   [[ $p == /* ]] || p="$2/$p"
+  p=$(normalize "$p")
+  while [[ -L $p && $hops -lt 8 ]]; do # an edit through a symlinked file lands on its target
+    link=$(readlink "$p") || break
+    [[ $link == /* ]] || link=${p%/*}/$link
+    p=$(normalize "$link")
+    hops=$((hops + 1))
+  done
   parent=${p%/*}
   d=${parent:-/}
   while [[ ! -d $d ]]; do d=${d%/*}; d=${d:-/}; done
@@ -78,8 +107,8 @@ resolve() { # resolve <path> <base dir>: sets path (absolute, existing directori
 }
 
 diff_lines() { # diff_lines <top> <file> -> lines added plus deleted against HEAD; an untracked file counts whole
-  if "$GIT_BIN" -C "$1" ls-files --error-unmatch -- "$2" >/dev/null 2>&1; then
-    "$GIT_BIN" -C "$1" diff --numstat HEAD -- "$2" 2>/dev/null | awk '{n += $1 + $2} END {print n + 0}'
+  if git_ -C "$1" ls-files --error-unmatch -- "$2" >/dev/null 2>&1; then
+    git_ -C "$1" diff --numstat HEAD -- "$2" 2>/dev/null | awk '{n += $1 + $2} END {print n + 0}'
   elif [[ -f $2 ]]; then
     wc -l <"$2"
   else
@@ -102,23 +131,47 @@ direct_how() { # direct_how <top>
 EXEMPTION_TEXT="trivial (one file, a few lines; it covers one file and at most $TRIVIAL_MAX_LINES changed lines), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or it handles secret values; it is never delegated and covers only the files you name; repo ownership, CI and IAM files are not in this class), lane (a coordinator session spawned this one to execute a unit it will review), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
 
 gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothing to allow
-  # Side effects: a trivial decision claims the first file it sees, and an allowed driver edit under
-  # delegate is added to the budget.
-  local root base top choice why n used events_dir
-  [[ -n $1 && $1 != *$'\n'* ]] || return 0
+  local root base top n
+  [[ -n $1 ]] || return 0
   n=$2
   [[ $n =~ $NUM ]] || n=0
   resolve "$1" "$cwd" || return 0
   root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || return 0
   [[ $path == "$root"/* ]] || return 0
+  if [[ $path == *$'\n'* ]]; then
+    echo "The delegation gate cannot track a path with a newline in it, so it refuses edits to such paths under $root."
+    return 0
+  fi
   base=$(state_base "$session" "$real") || return 0
   mkdir -p "${base%/*}" 2>/dev/null && [[ -w ${base%/*} ]] || return 0
-  top=$("$GIT_BIN" -C "$real" rev-parse --show-toplevel 2>/dev/null) || return 0
-  [[ $top =~ $PLAIN && $0 =~ $PLAIN ]] || return 0
+  top=$(git_ -C "$real" rev-parse --show-toplevel 2>/dev/null) || return 0
+  if ! [[ $top =~ $PLAIN && $0 =~ $PLAIN ]]; then
+    echo "hierarchical-implementation gate: not gating $top, because it or $0 has characters outside the plain set" >&2
+    return 0
+  fi
   if [[ ! -f $base.decision ]]; then
     echo "Implementation runs through worker subagents by default, with the user's standing authorization for editing workers, so decide before the main thread edits $top. Delegate: $(delegate_how "$top") Work directly only when the whole task is one of these exemptions: $EXEMPTION_TEXT. Then $(direct_how "$top"). Do not edit through the shell to get around this."
     return 0
   fi
+  lock "$base" || return 0
+  scope "$base" "$top" "$n"
+  rmdir "$base.lock" 2>/dev/null
+}
+
+lock() { # lock <base>: serializes the read-modify-write of one worktree's state across tool calls that run in parallel
+  local i
+  for ((i = 0; i < 20; i++)); do
+    mkdir "$1.lock" 2>/dev/null && return 0
+    sleep 0.05
+  done
+  rmdir "$1.lock" 2>/dev/null # left behind by a hook that was killed; no hook holds it this long
+  mkdir "$1.lock" 2>/dev/null
+}
+
+scope() { # scope <base> <top> <changed lines> -> prints a deny reason when the recorded decision does not cover this edit
+  # Side effects: a trivial decision claims the first file it sees, and an allowed driver edit under
+  # delegate is added to the budget.
+  local base=$1 top=$2 n=$3 choice why used events_dir
   IFS=$'\t' read -r choice why <"$base.decision"
   case $choice:$why in
     delegate:*)
@@ -155,8 +208,11 @@ gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothi
   esac
 }
 
-own_decide() { # own_decide <command>: true when the command is exactly this script's decide call with inert arguments
-  [[ $0 =~ $PLAIN && $1 == "$0 decide "* && $1 != *$'\n'* && ${1#"$0 decide "} =~ $DECIDE_ARGS ]]
+own_decide() { # own_decide <command>: true when the command is exactly this script's decide call, with inert arguments, for the calling session
+  local args=${1#"$0 decide "}
+  [[ $0 =~ $PLAIN && $1 == "$0 decide "* && $1 != *$'\n'* && $args =~ $DECIDE_ARGS ]] || return 1
+  args=${args#* }
+  [[ ${args%% *} == "$session" ]]
 }
 
 _flush() { # ends the word shell_tokens is building; it shares shell_tokens' locals through bash's dynamic scope
@@ -366,7 +422,7 @@ if [[ ${1:-} == decide ]]; then
     exit 1
   }
   base=$(state_base "$session" "$repo") || { echo "not a session id and git worktree: $session $repo" >&2; exit 1; }
-  top=$("$GIT_BIN" -C "$repo" rev-parse --show-toplevel)
+  top=$(git_ -C "$repo" rev-parse --show-toplevel)
   [[ $top =~ $PLAIN ]] || { echo "this gate never asks about $top" >&2; exit 1; }
   named=()
   for f in "${files[@]}"; do
@@ -375,7 +431,8 @@ if [[ ${1:-} == decide ]]; then
   done
   {
     mkdir -p "${base%/*}" "$(dirname "$DELEGATION_LOG")" &&
-      printf '%s\t%s\n' "$choice" "$reason" >"$base.decision" &&
+      printf '%s\t%s\n' "$choice" "$reason" >"$base.decision.new" &&
+      mv -f "$base.decision.new" "$base.decision" &&
       rm -f "$base.trivial" &&
       { ((${#named[@]} == 0)) || printf '%s\n' "${named[@]}" >>"$base.security"; } &&
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$top" "$choice" "$reason" "${named[*]}" >>"$DELEGATION_LOG"
@@ -435,11 +492,20 @@ case $tool in
   Edit | Write | MultiEdit | NotebookEdit)
     file=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' <<<"$input" 2>/dev/null) || exit 0
     changed=$(jq -r '[.tool_input | .old_string, .new_string, .content, .new_source, (.edits[]? | .old_string, .new_string)] | map(select(type == "string") | split("\n") | length) | add // 0' <<<"$input" 2>/dev/null) || changed=0
+    # replace_all changes every occurrence, so its size is one replacement times the occurrences
+    old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
+    if [[ -n $old && $changed =~ $NUM ]]; then
+      [[ $file == /* ]] || file=$cwd/$file
+      content=$(cat "$file" 2>/dev/null)
+      rest=${content//"$old"/}
+      hits=$(((${#content} - ${#rest}) / ${#old}))
+      ((hits > 1)) && changed=$((changed * hits))
+    fi
     reason=$(gate "$file" "$changed")
     ;;
   Bash | Monitor)
     cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
-    if [[ $tool == Bash ]] && own_decide "$cmd"; then
+    if [[ $tool == Bash ]] && own_decide "$cmd" && jq -e '.tool_input.dangerouslyDisableSandbox != true' <<<"$input" >/dev/null 2>&1; then
       jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:"records a hierarchical-implementation decision"}}'
       exit 0
     fi

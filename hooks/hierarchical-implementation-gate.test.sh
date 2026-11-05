@@ -16,7 +16,8 @@ W="$T/vscode/repo"
 git init -q -b main "$W"
 mkdir -p "$W/src" "$T/other"
 printf 'one\ntwo\n' >"$W/src/c.ts"
-git -C "$W" add src/c.ts
+seq 15 | sed 's/.*/x/' >"$W/src/r.ts"
+git -C "$W" add src/c.ts src/r.ts
 git -C "$W" -c user.email=t@t -c user.name=t commit -q -m init
 git init -q -b main "$T/other"
 
@@ -167,6 +168,15 @@ check approve "a security decide with files is approved" "$(shell s4 "$HOOK deci
 check none "a decide command chained with another is not approved" "$(shell s4 "$HOOK decide $W s4 direct \"trivial: one line typo fix\" && rm -rf $T/other")"
 check none "a decide command with a substitution is not approved" "$(shell s4 "$HOOK decide $W s4 direct \"trivial: one \$(touch $T/pwned) fix\"")"
 check none "a decide command with an exclamation mark is not approved" "$(shell s4 "$HOOK decide $W s4 direct \"trivial: one line fix!\"")"
+check none "a decide command for another session is not approved" "$(shell s4 "$HOOK decide $W s9 direct \"opt-out: the user said so\"")"
+check none "a decide command with the sandbox disabled is not approved" "$(tool PreToolUse Bash s4 "$(jq -cn --arg c "$HOOK decide $W s4 direct \"trivial: one line typo fix\"" '{command:$c,dangerouslyDisableSandbox:true}')")"
+
+# paths the edit tools would resolve into the root are judged there
+check deny "a .. through a missing directory is resolved into the root" "$(edit "$T/other/zzz/../../vscode/repo/src/c.ts" s8)"
+ln -s "$W/src/c.ts" "$T/other/flink"
+check deny "a symlinked file outside the root is judged by its target" "$(edit "$T/other/flink" s8)"
+check deny "a path with a newline under the root is denied" "$(edit "$W/src/x
+y.ts" s8)"
 
 # Bash and Monitor: recognized shell writes are gated like edits
 check deny "sed -i on a gated file is denied before a decision" "$(shell s5 "sed -i 's/one/uno/' $W/src/c.ts")"
@@ -229,6 +239,23 @@ check none "a named worker with model is allowed" "$(tool PreToolUse Agent s1 '{
 check none "an unnamed agent is allowed" "$(tool PreToolUse Agent s1 '{"prompt":"x","subagent_type":"Explore"}')"
 check none "a fork is allowed" "$(tool PreToolUse Agent s1 '{"name":"f1","prompt":"x","subagent_type":"fork"}')"
 check none "a session the gate never saw is not asked for a model" "$(tool PreToolUse Agent fresh '{"name":"w1","prompt":"x"}')"
+
+# edit sizes and state hold up against replace_all, git config and parallel calls
+runs "decide trivial for replace_all" 0 bash "$HOOK" decide "$W" s9 direct "trivial: one word swap in r"
+once=$(jq -cn --arg p "$W/src/r.ts" '{tool_input:{file_path:$p,old_string:"x",new_string:"y"}}')
+check none "trivial: a single replacement is small" "$(edit "$W/src/r.ts" s9 "$once")"
+every=$(jq -cn --arg p "$W/src/r.ts" '{tool_input:{file_path:$p,old_string:"x",new_string:"y",replace_all:true}}')
+check deny "trivial: replace_all counts every occurrence" "$(edit "$W/src/r.ts" s9 "$every")"
+git -C "$W" config core.fsmonitor "touch $T/pwned-fsmonitor"
+run "$(edit "$W/src/r.ts" s9)" >/dev/null
+git -C "$W" config --unset core.fsmonitor
+[[ ! -e $T/pwned-fsmonitor ]] && pass "the hook's git calls never run core.fsmonitor" || fail "core.fsmonitor ran"
+runs "decide trivial for a parallel race" 0 bash "$HOOK" decide "$W" s10 direct "trivial: one small parallel fix"
+run "$(edit "$W/src/p1.ts" s10)" >"$T/race1" &
+run "$(edit "$W/src/p2.ts" s10)" >"$T/race2" &
+wait
+denied=$(cat "$T/race1" "$T/race2" | grep -c '"deny"')
+[[ $denied == 1 ]] && pass "trivial: two parallel edits to different files let only one through" || fail "parallel trivial edits: $denied denied"
 
 git -C "$W" worktree add -q "$W/.worktrees/fix" -b fix
 mkdir -p "$W/.worktrees/fix/src"

@@ -83,10 +83,18 @@ bash hooks/hierarchical-implementation-gate.test.sh
 
 ## What it does not enforce
 
+The gate is a speed bump, not a barrier. It makes skipping delegation a deliberate, logged act. A model set on getting around it can still write files in ways the hook doesn't see.
+
 - **Whether a review was critical.** The log shows that messages were sent, not whether they were right.
 - **Which worktree a worker serves.** Any named editing worker spawned in the session satisfies `delegate`, including one spawned for another worktree. A spawned worker can also edit outside the files it owns; the skill has the driver check `git diff --name-only`.
-- **Other shell writes.** `cp`, `mv`, `patch`, `git apply`, scripts, writes inside `$(...)`, and targets built from variables other than `$HOME` are not recognized. Writes other than heredocs have no known size, so they don't count against the budget or the trivial cap. A command that writes more than 20 files is denied.
-- **Repeated decisions.** Recording `trivial` again frees its file for a new task. The log shows every repeat.
+- **Other shell writes.** The hook doesn't recognize:
+  - `cp`, `mv`, `patch`, `git apply` or scripts;
+  - writes inside `$(...)`;
+  - targets built from variables other than `$HOME`;
+  - the PowerShell tool.
+
+  Writes other than heredocs have no known size, so they don't count against the budget or the trivial cap. A command that writes more than 20 files is denied.
+- **Repeated decisions and commits.** Recording `trivial` again frees its file for a new task, and the log shows every repeat. The trivial cap measures the file against `HEAD`, so a commit resets it.
 - **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows.
 - **Errors and timeouts.** The hook fails open on any resolution error. If it takes longer than its timeout, Claude Code lets the call through. Commands of about 20 KB take around half a second.
 
@@ -99,6 +107,11 @@ One long session showed two gaps:
 - It made 22 edits to one spec file under a single `trivial` decision.
 
 Named files for `security` and the line cap for `trivial` come from that session. The spawn requirement and the integration budget close the gap where `delegate` was taken on trust. The log has no case of `delegate` being abused.
+
+## Notes
+
+- The skill and the deny text mention a `/repro` gate. That separate hook blocks source edits until a bug is reproduced, and it is not part of this plugin. The references are harmless without it.
+- The skill suggests Claude Opus for the driver and Claude Sonnet for editing workers. It asks before switching the main session's model.
 
 ## License
 
