@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/you/.claude/hooks/hierarchical-implementation-gate.sh decide:*)",
+      "Bash(~/.claude/hooks/hierarchical-implementation-gate.sh decide:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "s=\"$HOME/.claude/hooks/hierarchical-implementation-gate.sh\"; [ -x \"$s\" ] && \"$s\" || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
