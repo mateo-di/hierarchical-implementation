@@ -49,13 +49,15 @@ TRIVIAL_MAX_LINES="${TRIVIAL_MAX_LINES:-20}"
 INTEGRATE_MAX_LINES="${INTEGRATE_MAX_LINES:-60}"
 MAX_TARGETS=20 # distinct files one shell command may write; more is denied, which bounds the hook's run time
 EXEMPTIONS='trivial|security|lane|opt-out|no-subagents'
-PLAIN='^[A-Za-z0-9._/@+-]+$'
-SID='^[A-Za-z0-9-]+$'
+PLAIN_SET='[A-Za-z0-9._/@+-]'
+SID_SET='[A-Za-z0-9-]'
+PLAIN='^'$PLAIN_SET'+$'
+SID='^'$SID_SET'+$'
 NUM='^[0-9]+$'
 WORDS='^[^[:space:]]+([[:space:]]+[^[:space:]]+){2,}'
 # The only Bash command the hook approves: a decide call whose paths and ids use plain characters and
 # whose reason is double-quoted text with nothing bash expands or ends a string on inside quotes.
-DECIDE_ARGS='^[A-Za-z0-9._/@+-]+ [A-Za-z0-9-]+ (delegate|direct) "[^"`$\\!]*"( [A-Za-z0-9._/@+-]+)*$'
+DECIDE_ARGS='^'$PLAIN_SET'+ '$SID_SET'+ (delegate|direct) "[^"`$\\!]*"( '$PLAIN_SET'+)*$'
 ASSIGN='^[A-Za-z_][A-Za-z0-9_]*='
 FD_DUP='^([0-9]+-?|-)$'
 SED_INPLACE='^-[a-zA-Z]*i'
@@ -65,16 +67,22 @@ git_() { # git without core.fsmonitor, which would run a command from a .git/con
   "$GIT_BIN" -c core.fsmonitor=false "$@"
 }
 
-state_base() { # state_base <session> <path-in-worktree> -> <state dir>/delegation/<session>/<digest of the worktree git dir>
-  local d h
+repo_of() { # repo_of <dir>: sets top (the worktree root) and gitdir (its git dir) with one git call
+  local out
+  out=$(git_ -C "$1" rev-parse --show-toplevel --absolute-git-dir 2>/dev/null) || return 1
+  top=${out%%$'\n'*}
+  gitdir=${out#*$'\n'}
+}
+
+state_base() { # state_base <session> <git dir> -> <state dir>/delegation/<session>/<digest of the git dir>
+  local h
   [[ $1 =~ $SID ]] || return 1
-  d=$(git_ -C "$2" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  h=$(printf '%s' "$d" | git_ hash-object --stdin 2>/dev/null) && [[ -n $h ]] || return 1
+  h=$(printf '%s' "$2" | git_ hash-object --stdin 2>/dev/null) && [[ -n $h ]] || return 1
   printf '%s/delegation/%s/%s' "$STATE_DIR" "$1" "$h"
 }
 
-normalize() { # normalize <absolute path> -> the path without . and .. segments, removed lexically the way the edit tools resolve them
-  local rest=${1#/} part IFS
+normalize() { # normalize <absolute path>: sets normalized to the path without . and .. segments, removed lexically the way the edit tools resolve them
+  local rest=${1#/} part IFS=/
   local -a kept=()
   while [[ -n $rest ]]; do
     part=${rest%%/*}
@@ -85,18 +93,19 @@ normalize() { # normalize <absolute path> -> the path without . and .. segments,
       *) kept[${#kept[@]}]=$part ;;
     esac
   done
-  IFS=/
-  printf '/%s' "${kept[*]}"
+  normalized="/${kept[*]}"
 }
 
 resolve() { # resolve <path> <base dir>: sets path (absolute, normalized, existing directories and a symlinked file made physical) and real (its nearest existing directory)
   local p=$1 parent d link hops=0
   [[ $p == /* ]] || p="$2/$p"
-  p=$(normalize "$p")
+  normalize "$p"
+  p=$normalized
   while [[ -L $p && $hops -lt 8 ]]; do # an edit through a symlinked file lands on its target
     link=$(readlink "$p") || break
     [[ $link == /* ]] || link=${p%/*}/$link
-    p=$(normalize "$link")
+    normalize "$link"
+    p=$normalized
     hops=$((hops + 1))
   done
   parent=${p%/*}
@@ -128,23 +137,25 @@ delegate_how() { # delegate_how <top>
 direct_how() { # direct_how <top>
   printf '%s' "run $0 decide $1 $session direct \"<exemption>: <why, plain words>\" and retry; a security exemption also lists every file it covers after the reason, as paths relative to $1. Write reasons in plain words, without backticks, quotes, dollar signs, exclamation marks or backslashes"
 }
+instead_how() { # instead_how <top> -> the ways out of a trivial exemption the task outgrew
+  printf '%s' "Delegate: $(delegate_how "$1") Or record a different exemption: $(direct_how "$1")"
+}
 EXEMPTION_TEXT="trivial (one file, a few lines; it covers one file and at most $TRIVIAL_MAX_LINES changed lines), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or it handles secret values; it is never delegated and covers only the files you name; repo ownership, CI and IAM files are not in this class), lane (a coordinator session spawned this one to execute a unit it will review), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
 
 gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothing to allow
-  local root base top n
+  local base top gitdir n
   [[ -n $1 ]] || return 0
   n=$2
   [[ $n =~ $NUM ]] || n=0
   resolve "$1" "$cwd" || return 0
-  root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || return 0
   [[ $path == "$root"/* ]] || return 0
   if [[ $path == *$'\n'* ]]; then
     echo "The delegation gate cannot track a path with a newline in it, so it refuses edits to such paths under $root."
     return 0
   fi
-  base=$(state_base "$session" "$real") || return 0
+  repo_of "$real" || return 0
+  base=$(state_base "$session" "$gitdir") || return 0
   mkdir -p "${base%/*}" 2>/dev/null && [[ -w ${base%/*} ]] || return 0
-  top=$(git_ -C "$real" rev-parse --show-toplevel 2>/dev/null) || return 0
   if ! [[ $top =~ $PLAIN && $0 =~ $PLAIN ]]; then
     echo "hierarchical-implementation gate: not gating $top, because it or $0 has characters outside the plain set" >&2
     return 0
@@ -153,24 +164,13 @@ gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothi
     echo "Implementation runs through worker subagents by default, with the user's standing authorization for editing workers, so decide before the main thread edits $top. Delegate: $(delegate_how "$top") Work directly only when the whole task is one of these exemptions: $EXEMPTION_TEXT. Then $(direct_how "$top"). Do not edit through the shell to get around this."
     return 0
   fi
-  lock "$base" || return 0
   scope "$base" "$top" "$n"
-  rmdir "$base.lock" 2>/dev/null
-}
-
-lock() { # lock <base>: serializes the read-modify-write of one worktree's state across tool calls that run in parallel
-  local i
-  for ((i = 0; i < 20; i++)); do
-    mkdir "$1.lock" 2>/dev/null && return 0
-    sleep 0.05
-  done
-  rmdir "$1.lock" 2>/dev/null # left behind by a hook that was killed; no hook holds it this long
-  mkdir "$1.lock" 2>/dev/null
 }
 
 scope() { # scope <base> <top> <changed lines> -> prints a deny reason when the recorded decision does not cover this edit
   # Side effects: a trivial decision claims the first file it sees, and an allowed driver edit under
-  # delegate is added to the budget.
+  # delegate is appended to the budget. Both writes are safe under parallel tool calls without a
+  # lock: the claim is first-writer-wins, and a parallel batch can overshoot the budget only once.
   local base=$1 top=$2 n=$3 choice why used events_dir
   IFS=$'\t' read -r choice why <"$base.decision"
   case $choice:$why in
@@ -181,24 +181,23 @@ scope() { # scope <base> <top> <changed lines> -> prints a deny reason when the 
         echo "This session recorded delegate for $top but has not spawned a named worker that can edit (Explore and Plan agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
         return 0
       fi
-      used=$(cat "$base.driver" 2>/dev/null)
+      used=$(awk '{n += $1} END {print n + 0}' "$base.driver" 2>/dev/null)
       [[ $used =~ $NUM ]] || used=0
-      n=$((used + n))
-      if ((n > INTEGRATE_MAX_LINES)); then
-        echo "Under delegate the driver's own edits in $top would reach $n changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file with SendMessage, or spawn a worker for it. If the user asked you to finish it yourself, run $0 decide $top $session direct \"opt-out: <what the user said>\"."
+      if ((used + n > INTEGRATE_MAX_LINES)); then
+        echo "Under delegate the driver's own edits in $top would reach $((used + n)) changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file with SendMessage, or spawn a worker for it. If the user asked you to finish it yourself, run $0 decide $top $session direct \"opt-out: <what the user said>\"."
       else
-        echo "$n" >"$base.driver"
+        echo "$n" >>"$base.driver"
       fi
       ;;
     direct:trivial:*)
-      [[ -s $base.trivial ]] || printf '%s\n' "$path" >"$base.trivial"
+      (set -C && printf '%s\n' "$path" >"$base.trivial") 2>/dev/null
       if ! grep -qxF -- "$path" "$base.trivial"; then
-        echo "The trivial exemption recorded for $top covers one file and this edit is another, so the task is not trivial. Delegate: $(delegate_how "$top") Or record a different exemption: $(direct_how "$top"). Do not edit through the shell to get around this."
+        echo "The trivial exemption recorded for $top covers one file and this edit is another, so the task is not trivial. $(instead_how "$top"). Do not edit through the shell to get around this."
         return 0
       fi
       n=$(($(diff_lines "$top" "$path") + n))
       ((n <= TRIVIAL_MAX_LINES)) ||
-        echo "The trivial exemption covers a few lines, and this edit brings $path to about $n changed lines, past the cap of $TRIVIAL_MAX_LINES, so the task is not trivial. Delegate: $(delegate_how "$top") Or record a different exemption: $(direct_how "$top")."
+        echo "The trivial exemption covers a few lines, and this edit brings $path to about $n changed lines, past the cap of $TRIVIAL_MAX_LINES, so the task is not trivial. $(instead_how "$top")."
       ;;
     direct:security:*)
       grep -qxF -- "$path" "$base.security" 2>/dev/null ||
@@ -303,7 +302,7 @@ shell_tokens() { # shell_tokens <command> -> one token per line: w US flags US w
   done
 }
 
-expand_word() { # expand_word <word> <flags> -> the path the shell would see, expanding only ~ and $HOME; fails on any other expansion
+expand_word() { # expand_word <word> <flags>: sets expanded to the path the shell would see, expanding only ~ and $HOME; fails on any other expansion
   local v=$1
   if [[ $2 == *t* ]]; then
     # shellcheck disable=SC2088 # the word holds a literal ~ that this function expands itself
@@ -319,12 +318,13 @@ expand_word() { # expand_word <word> <flags> -> the path the shell would see, ex
     [[ $v != *[\$\`]* ]] || return 1
   fi
   [[ $v == /* ]] || v=$wd/$v
-  printf '%s' "$v"
+  expanded=$v
 }
 
 add_target() { # add_target <word> <flags>: records a file the current command line writes, once, up to MAX_TARGETS + 1 files
   local t i
-  t=$(expand_word "$1" "$2") || return 0
+  expand_word "$1" "$2" || return 0
+  t=$expanded
   for ((i = 0; i < ${#files[@]}; i++)); do
     if [[ ${files[i]} == "$t" ]]; then
       line_files[${#line_files[@]}]=$i
@@ -394,9 +394,9 @@ shell_targets() { # shell_targets <command> -> "<heredoc lines> TAB <file>" for 
       tee) [[ $b == -* ]] || add_target "$b" "$a" ;;
       sed) [[ $b == --in-place* || $b =~ $SED_INPLACE ]] && mode=inplace ;;
       perl) [[ $b =~ $SED_INPLACE && $b != -[MI]* ]] && mode=inplace ;;
-      inplace) [[ $b != -* ]] && t=$(expand_word "$b" "$a") && [[ -f $t ]] && add_target "$b" "$a" ;;
+      inplace) [[ $b != -* ]] && expand_word "$b" "$a" && [[ -f $expanded ]] && add_target "$b" "$a" ;;
       cd)
-        t=$(expand_word "$b" "$a") && [[ -d $t ]] && wd=$t
+        expand_word "$b" "$a" && [[ -d $expanded ]] && wd=$expanded
         mode=""
         ;;
     esac
@@ -421,8 +421,8 @@ if [[ ${1:-} == decide ]]; then
     echo "   or: $0 decide <worktree> <session> direct \"security: <why, three or more words>\" <file>..." >&2
     exit 1
   }
-  base=$(state_base "$session" "$repo") || { echo "not a session id and git worktree: $session $repo" >&2; exit 1; }
-  top=$(git_ -C "$repo" rev-parse --show-toplevel)
+  repo_of "$repo" || { echo "not a git worktree: $repo" >&2; exit 1; }
+  base=$(state_base "$session" "$gitdir") || { echo "not a session id: $session" >&2; exit 1; }
   [[ $top =~ $PLAIN ]] || { echo "this gate never asks about $top" >&2; exit 1; }
   named=()
   for f in "${files[@]}"; do
@@ -450,10 +450,10 @@ if [[ ${1:-} == report ]]; then
   [[ -f $DELEGATION_LOG ]] || { echo "no decisions recorded in $DELEGATION_LOG" >&2; exit 1; }
   events=$DELEGATION_EVENTS
   [[ -f $events ]] || events=/dev/null
-  awk -F'\t' '
+  awk -F'\t' -v ex="$EXEMPTIONS" '
     FILENAME == ARGV[1] {
       k = $4
-      if (k == "direct") k = match($5, /^(trivial|security|lane|opt-out|no-subagents):/) ? substr($5, 1, RLENGTH - 1) : "direct"
+      if (k == "direct") k = match($5, "^(" ex "):") ? substr($5, 1, RLENGTH - 1) : "direct"
       if (!($2 in kinds)) { order[++n] = $2; kinds[$2] = k }
       else if (index("+" kinds[$2] "+", "+" k "+") == 0) kinds[$2] = kinds[$2] "+" k
       next
@@ -470,8 +470,8 @@ fi
 [[ ${HIERARCHICAL_GATE:-on} == off ]] && exit 0
 
 input=$(cat)
-[[ -z $(jq -r '.agent_id // empty' <<<"$input" 2>/dev/null) ]] || exit 0
-IFS=$US read -r event tool session cwd < <(jq -r '[.hook_event_name // "PreToolUse", .tool_name // "", .session_id // "", .cwd // ""] | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
+IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // "", .hook_event_name // "PreToolUse", .tool_name // "", .session_id // "", .cwd // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
+[[ -z $agent ]] || exit 0
 cwd=${cwd:-$PWD}
 
 if [[ $event == PostToolUse ]]; then
@@ -487,6 +487,7 @@ if [[ $event == PostToolUse ]]; then
   exit 0
 fi
 
+root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || exit 0
 reason=""
 case $tool in
   Edit | Write | MultiEdit | NotebookEdit)
@@ -494,9 +495,8 @@ case $tool in
     changed=$(jq -r '[.tool_input | .old_string, .new_string, .content, .new_source, (.edits[]? | .old_string, .new_string)] | map(select(type == "string") | split("\n") | length) | add // 0' <<<"$input" 2>/dev/null) || changed=0
     # replace_all changes every occurrence, so its size is one replacement times the occurrences
     old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
-    if [[ -n $old && $changed =~ $NUM ]]; then
-      [[ $file == /* ]] || file=$cwd/$file
-      content=$(cat "$file" 2>/dev/null)
+    if [[ -n $old ]] && resolve "$file" "$cwd"; then
+      content=$(cat "$path" 2>/dev/null)
       rest=${content//"$old"/}
       hits=$(((${#content} - ${#rest}) / ${#old}))
       ((hits > 1)) && changed=$((changed * hits))
@@ -509,6 +509,7 @@ case $tool in
       jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:"records a hierarchical-implementation decision"}}'
       exit 0
     fi
+    case $cmd in *'>'* | *tee* | *sed* | *perl*) ;; *) exit 0 ;; esac # nothing else the tokenizer recognizes can write
     count=0
     while IFS=$'\t' read -r size target; do
       [[ -n $target ]] || continue
