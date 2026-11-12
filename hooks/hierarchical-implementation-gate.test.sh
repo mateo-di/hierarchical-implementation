@@ -11,6 +11,7 @@ fail() { printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
 T=$(cd "$(mktemp -d)" && pwd -P)
 export XDG_STATE_HOME="$T/state" HIERARCHICAL_GATE_ROOT="$T/vscode" DELEGATION_LOG="$T/decisions.tsv" DELEGATION_EVENTS="$T/events.tsv"
+unset LANE_MODE
 trap 'chmod -R u+w "$T"; rm -rf "$T"' EXIT
 W="$T/vscode/repo"
 git init -q -b main "$W"
@@ -256,6 +257,17 @@ run "$(edit "$W/src/p2.ts" s10)" >"$T/race2" &
 wait
 denied=$(cat "$T/race1" "$T/race2" | grep -c '"deny"')
 [[ $denied == 1 ]] && pass "trivial: two parallel edits to different files let only one through" || fail "parallel trivial edits: $denied denied"
+
+# LANE_MODE, exported by a lane spawner, outranks the brief
+runs "decide refuses the lane exemption in a driver lane" 1 env LANE_MODE=driver bash "$HOOK" decide "$W" s11 direct "lane: the coordinator spawned this session"
+runs "decide accepts the lane exemption in a unit lane" 0 env LANE_MODE=unit bash "$HOOK" decide "$W" s11 direct "lane: the coordinator spawned this session"
+check none "lane: a unit lane edits after recording lane" "$(edit "$W/src/a.ts" s11)"
+got=$(verdict "$(LANE_MODE=driver bash "$HOOK" <<<"$(edit "$W/src/a.ts" s11)")")
+[[ $got == deny ]] && pass "lane: a recorded lane exemption is denied in a driver lane" || fail "lane under LANE_MODE=driver: $got"
+reason=$(LANE_MODE=driver bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12)" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+[[ $reason == *"spawned as a driver lane"* ]] && pass "lane: an undecided driver lane is told to delegate" || fail "driver lane first-edit reason: $reason"
+reason=$(LANE_MODE=unit bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12)" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+[[ $reason == *"spawned as a unit lane"* ]] && pass "lane: an undecided unit lane is told to record lane" || fail "unit lane first-edit reason: $reason"
 
 git -C "$W" worktree add -q "$W/.worktrees/fix" -b fix
 mkdir -p "$W/.worktrees/fix/src"
