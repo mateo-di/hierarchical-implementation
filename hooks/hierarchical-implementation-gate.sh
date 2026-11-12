@@ -140,7 +140,7 @@ direct_how() { # direct_how <top>
 instead_how() { # instead_how <top> -> the ways out of a trivial exemption the task outgrew
   printf '%s' "Delegate: $(delegate_how "$1") Or record a different exemption: $(direct_how "$1")"
 }
-EXEMPTION_TEXT="trivial (one file, a few lines; it covers one file and at most $TRIVIAL_MAX_LINES changed lines), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or it handles secret values; it is never delegated and covers only the files you name; repo ownership, CI and IAM files are not in this class), lane (a coordinator session spawned this one to execute a unit it will review), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
+EXEMPTION_TEXT="trivial (one file, a few lines; it covers one file and at most $TRIVIAL_MAX_LINES changed lines), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or it handles secret values; it is never delegated and covers only the files you name; repo ownership, CI and IAM files are not in this class), lane (a coordinator session spawned this one to execute a unit it will review, and its brief does not set Lane mode: driver), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
 
 gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothing to allow
   local base top gitdir n

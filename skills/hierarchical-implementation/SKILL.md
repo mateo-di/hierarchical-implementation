@@ -10,9 +10,12 @@ standing authorization for editing workers. The main session is the driver: it p
 briefs, reviews, sends corrections and integrates, and edits the repo itself only to
 integrate. Inspection and planning need no implementation worker, but may use an appropriate
 specialist. A worker is a subagent started with the Agent tool and never spawns more workers.
-A session a coordinator started in its own pane to execute a unit is that coordinator's
-executor, reviewed by it, so it works directly (`lane`); any other session is a driver and
-follows this skill.
+A session a coordinator started in its own pane or tab is that coordinator's lane, and its
+brief sets the mode. `Lane mode: unit`, the default when the brief names none, executes one
+unit the coordinator reviews, so it works directly (`lane`). `Lane mode: driver` owns a whole
+task: it follows this skill as the driver, spawns subagents but no further sessions, and
+reports its integrated, verified result to the coordinator, which reviews it like a worker's.
+Any other session is a driver and follows this skill.
 
 Work directly only when the whole task is one of these exemptions, and record it as
 `<exemption>: <why>`:
@@ -23,7 +26,8 @@ Work directly only when the whole task is one of these exemptions, and record it
   These are never delegated, and the exemption covers only the files you name when you record
   it. Repo ownership, CI and IAM files are not in this class: a worker writes them and the
   driver reviews the diff.
-- `lane`: a coordinator session spawned this one to execute a unit it will review.
+- `lane`: a coordinator session spawned this one to execute a unit it will review, and the
+  brief does not set `Lane mode: driver`.
 - `opt-out`: the user or the repo's rules say not to delegate.
 - `no-subagents`: this harness has no subagent tool.
 
