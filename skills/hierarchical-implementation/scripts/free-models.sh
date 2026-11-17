@@ -14,7 +14,8 @@
 # run prints `model=<id> session=<id>` and then the worker's final message. A session id continues
 # that worker's session, which is how the driver sends corrections. --model runs one named model
 # with no rotation and no fallback. Exit: 0 finished; 3 fall back to an Agent worker (no free model
-# finished, or the free path is not set up); 1 a wrong call, or the --model run did not finish.
+# finished, or the free path is not set up); 1 a wrong call, or the --model model did not run or
+# finish for any reason, since falling back would swap it for another model.
 #
 # Each run uses the opencode agent HI_FREE_AGENT, which has to deny what a unit does not need:
 # --auto approves everything that agent leaves at "ask". A session on the opencode service keeps
@@ -48,15 +49,27 @@ EOF
   exit 1
 }
 
-fallback() { echo "free-models: $1; fall back to an Agent-tool worker" >&2; exit 3; }
+EXPLICIT="" # the model --model named, which is never swapped for another
 
-registry() { if [[ -s $REGISTRY ]]; then cat "$REGISTRY"; else echo '{"refreshed":0,"models":{}}'; fi; }
+fallback() { # fallback <why>: exit 3 sends the driver to an Agent worker; a named model exits 1 instead
+  if [[ -n $EXPLICIT ]]; then
+    echo "free-models: $1; $EXPLICIT did not run" >&2
+    exit 1
+  fi
+  echo "free-models: $1; fall back to an Agent-tool worker" >&2
+  exit 3
+}
+
+registry() { # a missing or unreadable registry starts over, so the next refresh rebuilds it
+  [[ -s $REGISTRY ]] && jq -c . "$REGISTRY" 2>/dev/null || echo '{"refreshed":0,"models":{}}'
+}
 
 update() { # update <jq filter> [jq options]: rewrites the registry under a lock; a failed filter leaves it as it was
   local filter=$1 lock="$REGISTRY.lock" new rc i
   shift
   mkdir -p "${REGISTRY%/*}" || return 1
-  for ((i = 0; i < 50; i++)); do mkdir "$lock" 2>/dev/null && break; sleep 0.1; done # a stale lock is ignored after 5s
+  for ((i = 0; i < 50; i++)); do mkdir "$lock" 2>/dev/null && break; sleep 0.1; done
+  ((i < 50)) || { rmdir "$lock" && mkdir "$lock"; } 2>/dev/null # a lock held for 5s was left by a killed run: take it over
   new=$(registry | jq "$@" "$filter") && [[ -n $new ]] && printf '%s\n' "$new" >"$REGISTRY.$$" && mv "$REGISTRY.$$" "$REGISTRY"
   rc=$?
   rm -f "$REGISTRY.$$"
@@ -67,7 +80,7 @@ update() { # update <jq filter> [jq options]: rewrites the registry under a lock
 bounded() { # bounded <seconds> <command...>: runs the command, stopped after that many seconds
   "${@:2}" &
   local pid=$! watch rc
-  (sleep "$1"; kill "$pid" 2>/dev/null) >/dev/null 2>&1 &
+  (sleep "$1"; kill -KILL "$pid" 2>/dev/null) >/dev/null 2>&1 &
   watch=$!
   wait "$pid"
   rc=$?
@@ -166,24 +179,24 @@ attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: p
 }
 
 run() {
-  local explicit="" model tries=0 note="" reg refreshed v
+  local model tries=0 note="" reg refreshed v
+  if [[ ${1:-} == --model ]]; then
+    EXPLICIT=${2:-}
+    [[ -n $EXPLICIT ]] || usage
+    shift 2
+  fi
   for v in COOLDOWN MAX_TRIES TIMEOUT STALL; do
     [[ ${!v} =~ ^[0-9]+$ ]] || fallback "HI_FREE_$v must be a whole number, not '${!v}'"
   done
-  if [[ ${1:-} == --model ]]; then
-    explicit=${2:-}
-    [[ -n $explicit ]] || usage
-    shift 2
-  fi
   [[ $# -ge 3 && $# -le 4 && -d $1 && -f $3 ]] || usage
   command -v "$OPENCODE" >/dev/null 2>&1 || fallback "opencode is not installed"
   local wt=$1 name=$2 brief session=${4:-}
   brief="$(cd "$(dirname "$3")" && pwd -P)/$(basename "$3")" # the worker runs in the worktree
-  if [[ -n $explicit ]]; then
-    attempt "$explicit" "$wt" "$name" "$brief" "" "$session"
+  if [[ -n $EXPLICIT ]]; then
+    attempt "$EXPLICIT" "$wt" "$name" "$brief" "" "$session"
     case $? in
       0) return 0 ;;
-      2) echo "free-models: $err" >&2 ;;
+      2) fallback "$err" ;;
     esac
     return 1
   fi

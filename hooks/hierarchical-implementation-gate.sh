@@ -63,9 +63,10 @@ DECIDE_ARGS='^'$PLAIN_SET'+ '$SID_SET'+ (delegate|direct) "[^"`$\\!]*"( '$PLAIN_
 ASSIGN='^[A-Za-z_][A-Za-z0-9_]*='
 # The skill's free-model worker as the whole command:
 #   [VAR=value ...] ["][dir/]free-models.sh["] run [--model <id>] <worktree> <name> <brief> [session] [redirections]
-# Anchored at both ends, with no ; & | < > inside an argument, so a mention of the script (echo, grep,
-# a commit message) or a chained command is not a spawn. Groups: 4 model, 5 name, 7 session.
-FREE_ARG='[^[:space:];&|<>]+'
+# Anchored at both ends, with no ; & | < > ( ) or backtick inside an argument, so a mention of the
+# script (echo, grep, a commit message), a chained command or a substitution is not read as a spawn.
+# Groups: 4 model, 5 name, 7 session.
+FREE_ARG='[^[:space:];&|<>()`]+'
 FREE_RUN='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*='$FREE_ARG'[[:space:]]+)*"?([^[:space:]";&|<>]*/)?free-models\.sh"?[[:space:]]+run([[:space:]]+--model[[:space:]]+('$FREE_ARG'))?[[:space:]]+'$FREE_ARG'[[:space:]]+('$FREE_ARG')[[:space:]]+'$FREE_ARG'([[:space:]]+('$FREE_ARG'))?([[:space:]]+[0-9]*>>?[[:space:]]*(&[0-9]+|'$FREE_ARG'))*[[:space:]]*$'
 FD_DUP='^([0-9]+-?|-)$'
 SED_INPLACE='^-[a-zA-Z]*i'

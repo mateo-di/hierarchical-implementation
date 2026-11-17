@@ -54,6 +54,9 @@ permissions:
   - {action: shell, resource: "make test*", effect: allow}
   - {action: shell, resource: "make check*", effect: allow}
   - {action: shell, resource: "make lint*", effect: allow}
+  # An allowed command is matched as one string, so these would otherwise write outside the worktree
+  - {action: shell, resource: "*>*", effect: deny}
+  - {action: shell, resource: "*--output*", effect: deny}
 ---
 
 You execute one unit for a coordinating session that reviews your diff. Change only the files the brief names. Never commit, push, open pull requests, or spawn agents. If a delegation gate asks for a plan, declare an audited_exception of type lane with the brief's files as the task's writePaths. A command you are denied stays denied: report it instead of looking for another way. End with a summary of your diff and the exact output of the checks the brief asks for.

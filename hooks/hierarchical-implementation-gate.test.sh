@@ -181,7 +181,8 @@ for c in "echo free-models.sh run a b c" \
   "git commit -m \"feat: free-models.sh run logs as a spawn\"" \
   "false && free-models.sh run $W parser /tmp/brief.md" \
   "free-models.sh run $W parser /tmp/brief.md; rm -rf $W" \
-  "free-models.sh run $W parser /tmp/brief.md | tee log"; do
+  "free-models.sh run $W parser /tmp/brief.md | tee log" \
+  "free-models.sh run $W parser \$(cat x)"; do
   free "$c" sfp >/dev/null
 done
 [[ -z $(grep sfp "$DELEGATION_EVENTS") ]] && pass "mentions and chained commands are not logged" || fail "events: $(grep sfp "$DELEGATION_EVENTS")"

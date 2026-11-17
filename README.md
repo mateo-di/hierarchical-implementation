@@ -77,7 +77,7 @@ Set these in the environment Claude Code starts with.
 
 ### Free-model workers (optional)
 
-With `HI_FREE_WORKERS=1` and [opencode](https://opencode.ai) installed, the skill tries each editing unit on a free model first, through `skills/hierarchical-implementation/scripts/free-models.sh`. That script runs a headless `opencode run` in the worktree and records which free models work. A model that fails, or prints nothing for a while (opencode retries rate limits silently), cools down and is retried later. When no free model finishes, the script exits 3 and the driver uses a normal Agent worker. The hook logs each run as a worker spawn, so it satisfies `delegate`.
+With `HI_FREE_WORKERS=1` and [opencode](https://opencode.ai) installed, the skill tries each editing unit on a free model first, through `skills/hierarchical-implementation/scripts/free-models.sh`. That script runs a headless `opencode run` in the worktree and records which free models work. A model that fails, or prints nothing for a while (opencode retries rate limits silently), cools down and is retried later. When no free model finishes, the script exits 3 and the driver uses a normal Agent worker. A model the user names runs through `--model`: once, with no cooldown and no fallback, and exit 1 when it cannot run or finish. The hook logs each run as a worker spawn, so it satisfies `delegate`.
 
 The run approves every permission its opencode agent leaves at "ask", so it needs a restricted agent. Install the example, which denies everything except file tools inside the worktree, git read commands and common test runners:
 
@@ -85,7 +85,7 @@ The run approves every permission its opencode agent leaves at "ask", so it need
 cp examples/opencode-lane-worker.md ~/.config/opencode/agents/lane-worker.md
 ```
 
-Without it the script exits 3 and the driver falls back. The agent narrows what the model can call. It is not a sandbox: a test runner executes the repo's code.
+Without it the script runs no model and the driver falls back. The agent narrows what the model can call. It is not a sandbox: a test runner executes the repo's code.
 
 | Variable | Default | Effect |
 |---|---|---|

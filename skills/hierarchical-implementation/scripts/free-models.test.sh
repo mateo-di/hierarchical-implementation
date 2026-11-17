@@ -108,6 +108,13 @@ expect "an explicit model that fails exits 1" "$?" "1"
 expect "an explicit model is not rotated" "$(calls)" "opencode/x-paid "
 fm run --model "" "$T/wt" unit7 "$T/brief.md" >/dev/null 2>&1
 expect "an empty explicit model is a wrong call, not a rotation" "$?" "1"
+OPENCODE_BIN="$T/missing" fm run --model opencode/x-paid "$T/wt" unit7 "$T/brief.md" >/dev/null 2>&1
+expect "an explicit model without opencode exits 1, never a fallback" "$?" "1"
+HI_FREE_STALL=abc fm run --model opencode/x-paid "$T/wt" unit7 "$T/brief.md" >/dev/null 2>&1
+expect "an explicit model with a malformed setting exits 1" "$?" "1"
+STUB_NO_AGENT=lane-worker fm run --model opencode/x-paid "$T/wt" unit7 "$T/brief.md" >/dev/null 2>"$T/err"
+expect "an explicit model without the restricted agent exits 1" "$?" "1"
+grep -q 'no agent named lane-worker.*opencode/x-paid did not run' "$T/err" && pass "the explicit failure names the model" || fail "stderr: $(cat "$T/err")"
 
 cool
 cp "$HI_FREE_REGISTRY" "$T/before.json"
@@ -135,6 +142,15 @@ for _ in 1 2 3 4 5; do
   [[ $(fm list | grep -c 'cooling down') == 2 ]] && ok=$((ok + 1))
 done
 expect "parallel failures keep both cooldowns" "$ok" "5"
+
+cool
+mkdir "$HI_FREE_REGISTRY.lock"
+STUB_FAIL="opencode/a-free" HI_FREE_MAX_TRIES=1 HI_FREE_MODELS_PREFER="opencode/a-free" fm run "$T/wt" unit14 "$T/brief.md" >/dev/null 2>&1
+expect "a stale lock is taken over and released" "$(fm list | grep -c 'cooling down'):$([[ -d $HI_FREE_REGISTRY.lock ]] && echo held || echo free)" "1:free"
+
+printf '{"refreshed": 9999999999, "models": {' >"$HI_FREE_REGISTRY"
+fm run "$T/wt" unit13 "$T/brief.md" >/dev/null 2>&1
+expect "a corrupt registry is rebuilt by the next run" "$?:$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "0:opencode/a-free opencode/b-free opencode/c-free"
 
 cp "$HI_FREE_REGISTRY" "$T/before.json"
 : >"$STUB_MODELS"
