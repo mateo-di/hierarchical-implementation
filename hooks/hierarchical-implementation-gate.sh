@@ -11,7 +11,7 @@
 #              past that it is authoring, not integrating
 #   trivial    one file, up to a cap of changed lines
 #   security   only the files named when it was recorded
-#   lane, opt-out, no-subagents   the whole worktree
+#   lane, opt-out, no-subagents   the whole worktree; lane never when LANE_MODE=driver
 # Changed lines are counted two ways on purpose. Trivial reads git's diff of its one file, which only
 # the driver touches. Delegate sums the driver's own edit payloads, because workers edit the same
 # worktree and git cannot tell their lines apart; an edit that later fails still counts.
@@ -141,6 +141,13 @@ instead_how() { # instead_how <top> -> the ways out of a trivial exemption the t
   printf '%s' "Delegate: $(delegate_how "$1") Or record a different exemption: $(direct_how "$1")"
 }
 EXEMPTION_TEXT="trivial (one file, a few lines; it covers one file and at most $TRIVIAL_MAX_LINES changed lines), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or it handles secret values; it is never delegated and covers only the files you name; repo ownership, CI and IAM files are not in this class), lane (a coordinator session spawned this one to execute a unit it will review, and its brief does not set Lane mode: driver), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
+# A spawner that starts lanes (herdr-spawn --lane) exports LANE_MODE, which outranks the brief's
+# Lane mode line: a brief can be misread or lost to compaction, the environment cannot.
+case ${LANE_MODE:-} in
+  driver) LANE_HINT=" This session was spawned as a driver lane (LANE_MODE=driver), so the lane exemption does not apply: delegate." ;;
+  unit) LANE_HINT=" This session was spawned as a unit lane (LANE_MODE=unit): record direct with the lane exemption." ;;
+  *) LANE_HINT="" ;;
+esac
 
 gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothing to allow
   local base top gitdir n
@@ -161,7 +168,7 @@ gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothi
     return 0
   fi
   if [[ ! -f $base.decision ]]; then
-    echo "Implementation runs through worker subagents by default, with the user's standing authorization for editing workers, so decide before the main thread edits $top. Delegate: $(delegate_how "$top") Work directly only when the whole task is one of these exemptions: $EXEMPTION_TEXT. Then $(direct_how "$top"). Do not edit through the shell to get around this."
+    echo "Implementation runs through worker subagents by default, with the user's standing authorization for editing workers, so decide before the main thread edits $top. Delegate: $(delegate_how "$top") Work directly only when the whole task is one of these exemptions: $EXEMPTION_TEXT. Then $(direct_how "$top").$LANE_HINT Do not edit through the shell to get around this."
     return 0
   fi
   scope "$base" "$top" "$n"
@@ -202,6 +209,10 @@ scope() { # scope <base> <top> <changed lines> -> prints a deny reason when the 
     direct:security:*)
       grep -qxF -- "$path" "$base.security" 2>/dev/null ||
         echo "The security exemption recorded for $top covers only the files named when it was recorded, and $path is not one of them. If this file also edits the agent's own controls or handles secret values, add it: run $0 decide $top $session direct \"security: <why, plain words>\" <file>. Otherwise give it to a named worker with the Agent tool and model set; subagent edits are not gated, while recording delegate here would drop the security scope."
+      ;;
+    direct:lane:*)
+      [[ ${LANE_MODE:-} != driver ]] ||
+        echo "The lane exemption recorded for $top does not apply: this session was spawned as a driver lane (LANE_MODE=driver). Delegate: $(delegate_how "$top")"
       ;;
     direct:*) ;; # lane, opt-out, no-subagents and reasons from older versions cover the whole worktree
   esac
@@ -421,6 +432,10 @@ if [[ ${1:-} == decide ]]; then
     echo "   or: $0 decide <worktree> <session> direct \"security: <why, three or more words>\" <file>..." >&2
     exit 1
   }
+  if [[ ${LANE_MODE:-} == driver && $choice == direct && $reason == lane:* ]]; then
+    echo "this session was spawned as a driver lane (LANE_MODE=driver): record delegate, not the lane exemption" >&2
+    exit 1
+  fi
   repo_of "$repo" || { echo "not a git worktree: $repo" >&2; exit 1; }
   base=$(state_base "$session" "$gitdir") || { echo "not a session id: $session" >&2; exit 1; }
   [[ $top =~ $PLAIN ]] || { echo "this gate never asks about $top" >&2; exit 1; }

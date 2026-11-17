@@ -45,7 +45,7 @@ There are three layers.
   - `delegate`: the driver's edits are denied until it has spawned a named worker that can edit. Read-only `Explore` and `Plan` agents don't count. After that, the driver's own edits count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
   - `trivial`: one file, up to a cap of changed lines.
   - `security`: only the files named when it was recorded. "Security" means the agent's own controls (hooks, gates, agent settings and permissions, `CLAUDE.md`, `AGENTS.md`, skill and agent definitions) or secret values. Repo ownership, CI and IAM files go to workers.
-  - `lane`, `opt-out`, `no-subagents`: the whole worktree.
+  - `lane`, `opt-out`, `no-subagents`: the whole worktree. `lane` is refused in a session started with `LANE_MODE=driver`, which a lane spawner such as `herdr-spawn --lane driver` exports.
 - **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
 - **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root.
 - **Logging.** Worker spawns and `SendMessage` calls are logged.

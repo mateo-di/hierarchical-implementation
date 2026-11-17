@@ -11,7 +11,8 @@ briefs, reviews, sends corrections and integrates, and edits the repo itself onl
 integrate. Inspection and planning need no implementation worker, but may use an appropriate
 specialist. A worker is a subagent started with the Agent tool and never spawns more workers.
 A session a coordinator started in its own pane or tab is that coordinator's lane, and its
-brief sets the mode. `Lane mode: unit`, the default when the brief names none, executes one
+brief sets the mode, unless the spawner exported `LANE_MODE` (`herdr-spawn --lane` does), which
+wins and which the gate enforces. `Lane mode: unit`, the default when the brief names none, executes one
 unit the coordinator reviews, so it works directly (`lane`). `Lane mode: driver` owns a whole
 task: it follows this skill as the driver, spawns subagents but no further sessions, and
 reports its integrated, verified result to the coordinator, which reviews it like a worker's.
@@ -27,7 +28,7 @@ Work directly only when the whole task is one of these exemptions, and record it
   it. Repo ownership, CI and IAM files are not in this class: a worker writes them and the
   driver reviews the diff.
 - `lane`: a coordinator session spawned this one to execute a unit it will review, and the
-  brief does not set `Lane mode: driver`.
+  mode is not driver (neither `LANE_MODE=driver` nor `Lane mode: driver` in the brief).
 - `opt-out`: the user or the repo's rules say not to delegate.
 - `no-subagents`: this harness has no subagent tool.
 
