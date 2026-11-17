@@ -19,7 +19,8 @@
 # Before a tool runs (hooks/hooks.json lists which), the hook gates file edits and the shell writes
 # shell_targets recognizes, approves this script's own decide command so recording costs no
 # permission prompt, and requires a model on named workers in sessions it has seen. After an agent
-# spawn or a message it logs the event to DELEGATION_EVENTS, which delegate and report read.
+# spawn or a message, or a Bash call that runs the skill's free-model worker (free-models.sh run),
+# it logs the event to DELEGATION_EVENTS, which delegate and report read.
 #
 # It is a speed bump that makes skipping delegation a deliberate, logged act, not a barrier: a model
 # set on getting around it can write files in ways it does not see.
@@ -59,6 +60,8 @@ WORDS='^[^[:space:]]+([[:space:]]+[^[:space:]]+){2,}'
 # whose reason is double-quoted text with nothing bash expands or ends a string on inside quotes.
 DECIDE_ARGS='^'$PLAIN_SET'+ '$SID_SET'+ (delegate|direct) "[^"`$\\!]*"( '$PLAIN_SET'+)*$'
 ASSIGN='^[A-Za-z_][A-Za-z0-9_]*='
+# The skill's free-model worker: free-models.sh run [--model <id>] <worktree> <name> <brief> [session]
+FREE_RUN='free-models\.sh[[:space:]]+run[[:space:]]+(--model[[:space:]]+([^[:space:]]+)[[:space:]]+)?[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]]+([[:space:]]+(ses_[A-Za-z0-9]+))?'
 FD_DUP='^([0-9]+-?|-)$'
 SED_INPLACE='^-[a-zA-Z]*i'
 US=$'\x1f'
@@ -475,13 +478,21 @@ IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // "", .hook_
 cwd=${cwd:-$PWD}
 
 if [[ $event == PostToolUse ]]; then
+  fields=""
   case $tool in
     Agent | Task) kind=spawn ;;
     SendMessage) kind=message ;;
+    Bash) # a free-model worker counts like an Agent worker; continuing its session is a message
+      cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
+      [[ $cmd =~ $FREE_RUN ]] || exit 0
+      kind=spawn
+      [[ -n ${BASH_REMATCH[5]} ]] && kind=message
+      fields="${BASH_REMATCH[3]}"$'\t'"${BASH_REMATCH[2]:-free}"$'\t'free-models
+      ;;
     *) exit 0 ;;
   esac
   [[ $session =~ $SID ]] || exit 0
-  fields=$(jq -r '.tool_input | [.name // .to // "", .model // "", .subagent_type // ""] | map(tostring | gsub("[\\t\\n\\r]"; " ")) | join("\t")' <<<"$input" 2>/dev/null) || exit 0
+  [[ -n $fields ]] || fields=$(jq -r '.tool_input | [.name // .to // "", .model // "", .subagent_type // ""] | map(tostring | gsub("[\\t\\n\\r]"; " ")) | join("\t")' <<<"$input" 2>/dev/null) || exit 0
   mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$kind" "$fields" >>"$DELEGATION_EVENTS" 2>/dev/null
   exit 0

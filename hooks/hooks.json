@@ -15,7 +15,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Agent|Task|SendMessage",
+        "matcher": "Agent|Task|SendMessage|Bash",
         "hooks": [
           {
             "type": "command",

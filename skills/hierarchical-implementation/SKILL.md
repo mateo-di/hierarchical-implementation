@@ -79,6 +79,38 @@ agent's model, and confirm the actual model in `/tasks` when possible.
    still gets CLAUDE.md's fresh verifier. Report what actually passed, not assumed CI
    results. Publication and live changes need separate user approval.
 
+## Optional: free-model workers
+
+Off unless `HI_FREE_WORKERS=1` is set and `opencode` is installed. When it is on, try a free
+model before an Agent worker for each editing unit. A free model is never a blocker.
+
+- Write the brief to a file outside the worktree (the session scratchpad). Give it the same
+  contents as an Agent worker's brief, and add: it is a lane worker this session reviews; it
+  spawns no agents and does not commit; if a delegation gate asks it for a plan, it records the
+  lane exemption.
+- Run `<this skill's directory>/scripts/free-models.sh run <worktree> <name> <brief-file>`
+  with `run_in_background`, using plain unquoted paths. It tries `HI_FREE_MODELS_PREFER`
+  first, skips models still cooling down after a failure, hands a failed run to the next free
+  model, and prints `model=<id> session=<id>` and the worker's last message. The gate logs
+  the call as a spawn.
+- Exit 3 means no free model finished the unit. Give the same brief to an Agent worker with
+  the model chosen above, without waiting for a free model to recover.
+- Review it like any worker. Send corrections to the same session with
+  `free-models.sh run <worktree> <name> <corrections-file> <session>`; the three-round limit
+  applies. After two rounds that fail review, re-brief a fresh Agent worker instead.
+- `free-models.sh list` shows each model's state. The registry refreshes from
+  `opencode models` once a day: ids ending in `-free` or `:free`, and OpenRouter ones only
+  when they support tools.
+
+## Explicit model requests
+
+When the user names the model for a worker ("use fable for this unit", "spawn a mythos
+worker", "run the parser on gpt-6-sol"):
+1. An Agent tool model alias → an Agent worker with that model.
+2. Otherwise a model `opencode models` lists → `free-models.sh run --model <provider/model>`
+   with the arguments above. It runs only that model, with no rotation and no fallback.
+3. Neither → tell the user it is unavailable and ask. Never substitute another model.
+
 The `hierarchical-implementation-gate.sh` hook denies the main thread's first edit in a
 `~/vscode` worktree until the session records `delegate` or a `direct` exemption with the
 `decide` command its message prints, which the hook approves itself. It then holds each

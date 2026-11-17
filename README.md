@@ -75,10 +75,26 @@ The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cac
 
 Set these in the environment Claude Code starts with.
 
+### Free-model workers (optional)
+
+With `HI_FREE_WORKERS=1` and [opencode](https://opencode.ai) installed, the skill tries each editing unit on a free model first, through `skills/hierarchical-implementation/scripts/free-models.sh`. That script runs a headless `opencode run` in the worktree and records which free models work. A model that fails cools down and is retried later. When no free model finishes, the script exits 3 and the driver uses a normal Agent worker. The hook logs each run as a worker spawn, so it satisfies `delegate`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `HI_FREE_WORKERS` | unset | `1` turns free-model workers on |
+| `HI_FREE_MODELS_PREFER` | empty | Space-separated model ids to try first |
+| `HI_FREE_COOLDOWN` | `3600` | Seconds a failed model is skipped |
+| `HI_FREE_MAX_TRIES` | `3` | Models tried per unit before falling back |
+| `HI_FREE_TIMEOUT` | `1800` | Seconds one run may take, where `timeout` exists |
+| `HI_FREE_REGISTRY` | `…/hierarchical-implementation/free-models.json` | Registry under `$XDG_STATE_HOME` |
+
+Free models come and go, and some providers keep or train on prompts. Check each provider's terms before sending it code.
+
 ## Tests
 
 ```bash
 bash hooks/hierarchical-implementation-gate.test.sh
+bash skills/hierarchical-implementation/scripts/free-models.test.sh
 ```
 
 ## What it does not enforce
