@@ -7,7 +7,8 @@
 #
 # Each decision is judged before the task's size shows, so each one is held to what it claims:
 #   delegate   the driver edits only after it spawned a named worker that can edit (Explore and Plan
-#              do not count), and only up to an integration budget of changed lines per worktree;
+#              do not count) or started a free-models.sh run, and only up to an integration budget
+#              of changed lines per worktree;
 #              past that it is authoring, not integrating
 #   trivial    one file, up to a cap of changed lines
 #   security   only the files named when it was recorded
@@ -60,8 +61,12 @@ WORDS='^[^[:space:]]+([[:space:]]+[^[:space:]]+){2,}'
 # whose reason is double-quoted text with nothing bash expands or ends a string on inside quotes.
 DECIDE_ARGS='^'$PLAIN_SET'+ '$SID_SET'+ (delegate|direct) "[^"`$\\!]*"( '$PLAIN_SET'+)*$'
 ASSIGN='^[A-Za-z_][A-Za-z0-9_]*='
-# The skill's free-model worker: free-models.sh run [--model <id>] <worktree> <name> <brief> [session]
-FREE_RUN='free-models\.sh[[:space:]]+run[[:space:]]+(--model[[:space:]]+([^[:space:]]+)[[:space:]]+)?[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]]+([[:space:]]+(ses_[A-Za-z0-9]+))?'
+# The skill's free-model worker as the whole command:
+#   [VAR=value ...] ["][dir/]free-models.sh["] run [--model <id>] <worktree> <name> <brief> [session] [redirections]
+# Anchored at both ends, with no ; & | < > inside an argument, so a mention of the script (echo, grep,
+# a commit message) or a chained command is not a spawn. Groups: 4 model, 5 name, 7 session.
+FREE_ARG='[^[:space:];&|<>]+'
+FREE_RUN='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*='$FREE_ARG'[[:space:]]+)*"?([^[:space:]";&|<>]*/)?free-models\.sh"?[[:space:]]+run([[:space:]]+--model[[:space:]]+('$FREE_ARG'))?[[:space:]]+'$FREE_ARG'[[:space:]]+('$FREE_ARG')[[:space:]]+'$FREE_ARG'([[:space:]]+('$FREE_ARG'))?([[:space:]]+[0-9]*>>?[[:space:]]*(&[0-9]+|'$FREE_ARG'))*[[:space:]]*$'
 FD_DUP='^([0-9]+-?|-)$'
 SED_INPLACE='^-[a-zA-Z]*i'
 US=$'\x1f'
@@ -181,7 +186,7 @@ scope() { # scope <base> <top> <changed lines> -> prints a deny reason when the 
       events_dir=$(dirname "$DELEGATION_EVENTS")
       [[ -d $events_dir && -w $events_dir ]] || return 0
       if ! worker_spawned; then
-        echo "This session recorded delegate for $top but has not spawned a named worker that can edit (Explore and Plan agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
+        echo "This session recorded delegate for $top but has not spawned a named worker that can edit (Explore and Plan agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, or start the skill's free-models.sh run for a free-model worker, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
         return 0
       fi
       used=$(awk '{n += $1} END {print n + 0}' "$base.driver" 2>/dev/null)
@@ -486,8 +491,8 @@ if [[ $event == PostToolUse ]]; then
       cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
       [[ $cmd =~ $FREE_RUN ]] || exit 0
       kind=spawn
-      [[ -n ${BASH_REMATCH[5]} ]] && kind=message
-      fields="${BASH_REMATCH[3]}"$'\t'"${BASH_REMATCH[2]:-free}"$'\t'free-models
+      [[ -n ${BASH_REMATCH[7]} ]] && kind=message
+      fields="${BASH_REMATCH[5]}"$'\t'"${BASH_REMATCH[4]:-free}"$'\t'free-models
       ;;
     *) exit 0 ;;
   esac
