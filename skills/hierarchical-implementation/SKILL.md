@@ -129,6 +129,6 @@ worker that can edit, and only up to an integration budget of changed lines; `tr
 covers one file and a line cap; `security` covers the files it names. It applies the same
 rules to the shell writes it recognizes in Bash and Monitor commands (`>`, `>>`, `tee`,
 `sed -i`, `perl -i`), requires `model` on named worker calls, and logs spawns, SendMessage
-calls and `free-models.sh run` calls, which its `report` command summarizes per session. It cannot classify
-work or judge whether a review was critical. This skill and project rules do not override
-user instructions or the harness.
+calls and `free-models.sh run` calls, which its `report` command summarizes per session. It
+cannot classify work or judge whether a review was critical. This skill and project rules do
+not override user instructions or the harness.
