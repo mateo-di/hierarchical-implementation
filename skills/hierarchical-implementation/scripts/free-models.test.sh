@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression suite for free-models.sh: runs it against a stub opencode that fails the models named
-# in STUB_FAIL, hangs silently on the ones in STUB_STALL, and knows no agent named in STUB_NO_AGENT.
+# in STUB_FAIL, hangs silently on the ones in STUB_STALL, refuses the ones in STUB_GONE as
+# unavailable, and knows no agent named in STUB_NO_AGENT.
 # Checks rotation, stalls, cooldown, fallback, sessions, refresh and the registry's integrity.
 #   bash skills/hierarchical-implementation/scripts/free-models.test.sh
 set -u
@@ -168,10 +169,16 @@ fm run "$T/wt" unit12 "$T/brief.md" >/dev/null
 expect "a day-old registry refreshes before a run" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free opencode/new-free"
 
 : >"$STUB_LOG"
-STUB_GONE="opencode/new-free" HI_FREE_MODELS_PREFER="opencode/new-free" fm run "$T/wt" unit15 "$T/brief.md" >/dev/null 2>&1
-expect "a model opencode no longer offers hands over to the next" "$(calls)" "opencode/new-free opencode/a-free "
-expect "a model opencode no longer offers leaves the registry" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free"
+printf 'opencode/a-free\n' >"$STUB_MODELS"
+STUB_GONE="opencode/new-free" HI_FREE_MAX_TRIES=1 HI_FREE_MODELS_PREFER="opencode/new-free" fm run "$T/wt" unit15 "$T/brief.md" >/dev/null 2>&1
+expect "an unavailable model costs no try and hands over to the next" "$(calls)" "opencode/new-free opencode/a-free "
+expect "an unavailable model opencode no longer lists leaves the registry" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free"
 grep -q '^opencode/a-free|[^|]*|[^|]*|An earlier attempt' "$STUB_LOG" && fail "a model that never ran sent the retry note" || pass "a model that never ran sends no retry note"
+
+printf 'opencode/a-free\nopencode/b-free\n' >"$STUB_MODELS"
+fm refresh
+STUB_GONE="opencode/b-free" HI_FREE_MODELS_PREFER="opencode/b-free" fm run "$T/wt" unit16 "$T/brief.md" >/dev/null 2>&1
+expect "an unavailable model opencode still lists stays and cools down" "$(fm list | grep b-free | cut -f2,3)" $'cooling down\tModel unavailable: opencode/b-free'
 
 fm bogus >/dev/null 2>&1
 expect "an unknown command exits 1" "$?" "1"
