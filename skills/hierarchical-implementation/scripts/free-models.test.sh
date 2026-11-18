@@ -16,13 +16,13 @@ expect() { # expect <label> <got> <want>
 
 T=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$T"' EXIT
-export HI_FREE_REGISTRY="$T/registry.json" OPENCODE_BIN="$T/opencode" STUB_LOG="$T/calls.log" STUB_MODELS="$T/models" STUB_PIDS="$T/pids" STUB_INTERRUPTS="$T/interrupts"
-mkdir -p "$T/wt"
+export HI_FREE_REGISTRY="$T/registry.json" OPENCODE_BIN="$T/opencode" STUB_LOG="$T/calls.log" STUB_MODELS="$T/models" STUB_MODELS_LOG="$T/models.log" STUB_PIDS="$T/pids" STUB_INTERRUPTS="$T/interrupts"
+mkdir -p "$T/wt" "$T/home"
 printf 'do the unit\n' >"$T/brief.md"
 printf 'opencode/a-free\nopencode/b-free\nopencode/c-free\nanthropic/paid\n' >"$STUB_MODELS"
 cat >"$OPENCODE_BIN" <<'EOF'
 #!/usr/bin/env bash
-[[ $1 == models ]] && { cat "$STUB_MODELS"; exit 0; }
+[[ $1 == models ]] && { echo "$PWD" >>"$STUB_MODELS_LOG"; cat "$STUB_MODELS"; exit 0; }
 [[ $1 == api ]] && { echo "$2 ${4#sessionID=}" >>"$STUB_INTERRUPTS"; exit 0; }
 model="" session="" agent="" file=""
 while (($#)); do
@@ -168,11 +168,12 @@ jq '.refreshed = 0' "$HI_FREE_REGISTRY" >"$T/r" && mv "$T/r" "$HI_FREE_REGISTRY"
 fm run "$T/wt" unit12 "$T/brief.md" >/dev/null
 expect "a day-old registry refreshes before a run" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free opencode/new-free"
 
-: >"$STUB_LOG"
-printf 'opencode/a-free\n' >"$STUB_MODELS"
-STUB_GONE="opencode/new-free" HI_FREE_MAX_TRIES=1 HI_FREE_MODELS_PREFER="opencode/new-free" fm run "$T/wt" unit15 "$T/brief.md" >/dev/null 2>&1
-expect "an unavailable model costs no try and hands over to the next" "$(calls)" "opencode/new-free opencode/a-free "
-expect "an unavailable model opencode no longer lists leaves the registry" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free"
+: >"$STUB_LOG" && : >"$STUB_MODELS_LOG"
+jq '.models += {"opencode/gone1-free": {}, "opencode/gone2-free": {}}' "$HI_FREE_REGISTRY" >"$T/r" && mv "$T/r" "$HI_FREE_REGISTRY"
+HOME="$T/home" STUB_GONE="opencode/gone1-free opencode/gone2-free" HI_FREE_MODELS_PREFER="opencode/gone1-free opencode/gone2-free" fm run "$T/wt" unit15 "$T/brief.md" >/dev/null 2>&1
+expect "an unavailable model hands over, and the other stale one is skipped unstarted" "$(calls)" "opencode/gone1-free opencode/a-free "
+expect "models opencode no longer lists leave the registry" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free opencode/new-free"
+expect "the run re-reads opencode's list once, from the home directory" "$(cat "$STUB_MODELS_LOG")" "$T/home"
 grep -q '^opencode/a-free|[^|]*|[^|]*|An earlier attempt' "$STUB_LOG" && fail "a model that never ran sent the retry note" || pass "a model that never ran sends no retry note"
 
 printf 'opencode/a-free\nopencode/b-free\n' >"$STUB_MODELS"

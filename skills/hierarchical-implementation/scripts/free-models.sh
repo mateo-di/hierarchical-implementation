@@ -91,7 +91,8 @@ bounded() { # bounded <seconds> <command...>: runs the command, stopped after th
 
 refresh() { # free models opencode can reach; all or nothing, so a failed lookup keeps the old list
   local ids tools
-  ids=$(bounded 60 "$OPENCODE" models 2>/dev/null | grep -E '(-free|:free)$')
+  # listed from a neutral directory: a repo's own opencode config can hide providers that runs reach
+  ids=$(cd "$HOME" && bounded 60 "$OPENCODE" models 2>/dev/null | grep -E '(-free|:free)$')
   [[ -n $ids ]] || { echo "free-models: opencode lists no free models" >&2; return 1; }
   # OpenRouter offers free models that cannot call tools, and a worker needs tools
   if grep -q '^openrouter/' <<<"$ids"; then
@@ -180,7 +181,7 @@ attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: p
 }
 
 run() {
-  local model tries=0 note="" reg refreshed v
+  local model tries=0 note="" reg refreshed v relisted=""
   if [[ ${1:-} == --model ]]; then
     EXPLICIT=${2:-}
     [[ -n $EXPLICIT ]] || usage
@@ -208,6 +209,8 @@ run() {
   fi
   set -f # model ids are split on whitespace, never globbed
   for model in $(candidates "$reg"); do
+    # skip, unstarted, a stale model that this run's refresh already dropped
+    [[ -n $relisted && $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
     tries=$((tries + 1))
     ((tries > MAX_TRIES)) && break
     attempt "$model" "$wt" "$name" "$brief" "$note" "$session"
@@ -215,13 +218,12 @@ run() {
       0) mark "$model" ok; return 0 ;;
       2) fallback "$err" ;;
     esac
-    # opencode refused the model before it ran. Its list may have changed since the daily refresh,
-    # so re-read it: a model it no longer offers leaves the registry and costs no try. One it still
-    # lists was refused only here, perhaps by this repo's config, and cools down like any failure.
-    if [[ $err == "Model unavailable: $model"* ]] && refresh 2>/dev/null &&
-      [[ $(registry | jq --arg id "$model" '.models | has($id)') == false ]]; then
-      tries=$((tries - 1))
-      continue
+    # opencode refused the model before it ran, so its list may have changed since the daily
+    # refresh: re-read it, once per run. A model it no longer offers leaves the registry, with no
+    # retry note since nothing ran; one it still lists cools down like any failure.
+    if [[ $err == "Model unavailable: $model"* && -z $relisted ]] && refresh 2>/dev/null; then
+      relisted=1
+      [[ $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
     fi
     mark "$model" fail "$err"
     note=$RETRY_NOTE
