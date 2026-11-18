@@ -92,7 +92,10 @@ blocker.
   worker is logged the gate denies the driver's writes in the worktree. Give it an Agent
   worker's brief, with every file the unit may create or change listed by exact path, and
   add: it is a lane worker this session reviews; it spawns no agents and does not commit; if
-  a delegation gate asks for a plan, it records the lane exception with those paths.
+  a delegation gate asks for a plan, it records the lane exception with those paths. Name
+  checks the restricted agent can run: the example agent allows git read commands and test
+  runners such as `pytest`, `npm test`, `go test` or `bash` on a `*test*.sh` script, and refuses
+  any other command, such as `python3 test_x.py`.
 - Run `<this skill's directory>/scripts/free-models.sh run <worktree> <name> <brief-file>`
   with `run_in_background`, since a unit outlasts the foreground time limit. Pass each
   argument as one plain word, never chained with another command, or the gate does not see
@@ -111,7 +114,7 @@ blocker.
   applies.
 - `free-models.sh list` shows each model's state. The registry refreshes from
   `opencode models` once a day: ids ending in `-free` or `:free`, and OpenRouter ones only
-  when they support tools.
+  when they support tools. A model opencode reports unavailable leaves the registry at once.
 
 ## Explicit model requests
 
