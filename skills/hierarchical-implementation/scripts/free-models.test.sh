@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression suite for free-models.sh: runs it against a stub opencode that fails the models named
-# in STUB_FAIL, hangs silently on the ones in STUB_STALL, and knows no agent named in STUB_NO_AGENT.
+# in STUB_FAIL, hangs silently on the ones in STUB_STALL, refuses the ones in STUB_GONE as
+# unavailable, and knows no agent named in STUB_NO_AGENT.
 # Checks rotation, stalls, cooldown, fallback, sessions, refresh and the registry's integrity.
 #   bash skills/hierarchical-implementation/scripts/free-models.test.sh
 set -u
@@ -15,13 +16,13 @@ expect() { # expect <label> <got> <want>
 
 T=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$T"' EXIT
-export HI_FREE_REGISTRY="$T/registry.json" OPENCODE_BIN="$T/opencode" STUB_LOG="$T/calls.log" STUB_MODELS="$T/models" STUB_PIDS="$T/pids" STUB_INTERRUPTS="$T/interrupts"
-mkdir -p "$T/wt"
+export HI_FREE_REGISTRY="$T/registry.json" OPENCODE_BIN="$T/opencode" STUB_LOG="$T/calls.log" STUB_MODELS="$T/models" STUB_MODELS_LOG="$T/models.log" STUB_PIDS="$T/pids" STUB_INTERRUPTS="$T/interrupts"
+mkdir -p "$T/wt" "$T/home"
 printf 'do the unit\n' >"$T/brief.md"
 printf 'opencode/a-free\nopencode/b-free\nopencode/c-free\nanthropic/paid\n' >"$STUB_MODELS"
 cat >"$OPENCODE_BIN" <<'EOF'
 #!/usr/bin/env bash
-[[ $1 == models ]] && { cat "$STUB_MODELS"; exit 0; }
+[[ $1 == models ]] && { echo "$PWD" >>"$STUB_MODELS_LOG"; cat "$STUB_MODELS"; exit 0; }
 [[ $1 == api ]] && { echo "$2 ${4#sessionID=}" >>"$STUB_INTERRUPTS"; exit 0; }
 model="" session="" agent="" file=""
 while (($#)); do
@@ -48,6 +49,10 @@ if [[ " ${STUB_STALL:-} " == *" $model "* ]]; then # opencode starts the step, t
   printf '{"type":"step_start","sessionID":"%s"}\n' "$session"
   sleep 60
   exit 0
+fi
+if [[ " ${STUB_GONE:-} " == *" $model "* ]]; then # opencode no longer offers the model
+  printf '{"type":"error","error":{"type":"unknown","message":"Model unavailable: %s"}}\n' "$model"
+  exit 1
 fi
 if [[ " ${STUB_FAIL:-} " == *" $model "* ]]; then
   printf '{"type":"error","sessionID":"%s","error":{"type":"rate-limit","message":"rate limited"}}\n' "$session"
@@ -162,6 +167,26 @@ printf 'opencode/a-free\nopencode/new-free\n' >"$STUB_MODELS"
 jq '.refreshed = 0' "$HI_FREE_REGISTRY" >"$T/r" && mv "$T/r" "$HI_FREE_REGISTRY"
 fm run "$T/wt" unit12 "$T/brief.md" >/dev/null
 expect "a day-old registry refreshes before a run" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free opencode/new-free"
+
+: >"$STUB_LOG" && : >"$STUB_MODELS_LOG"
+jq '.models += {"opencode/gone1-free": {}, "opencode/gone2-free": {}}' "$HI_FREE_REGISTRY" >"$T/r" && mv "$T/r" "$HI_FREE_REGISTRY"
+HOME="$T/home" STUB_GONE="opencode/gone1-free opencode/gone2-free" HI_FREE_MODELS_PREFER="opencode/gone1-free opencode/gone2-free" fm run "$T/wt" unit15 "$T/brief.md" >/dev/null 2>&1
+expect "an unavailable model hands over, and the other stale one is skipped unstarted" "$(calls)" "opencode/gone1-free opencode/a-free "
+expect "models opencode no longer lists leave the registry" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free opencode/new-free"
+expect "the run re-reads opencode's list once, from the home directory" "$(cat "$STUB_MODELS_LOG")" "$T/home"
+grep -q '^opencode/a-free|[^|]*|[^|]*|An earlier attempt' "$STUB_LOG" && fail "a model that never ran sent the retry note" || pass "a model that never ran sends no retry note"
+
+printf 'opencode/a-free\nopencode/b-free\n' >"$STUB_MODELS"
+fm refresh
+STUB_GONE="opencode/b-free" HI_FREE_MODELS_PREFER="opencode/b-free" fm run "$T/wt" unit16 "$T/brief.md" >/dev/null 2>&1
+expect "an unavailable model opencode still lists stays and cools down" "$(fm list | grep b-free | cut -f2,3)" $'cooling down\tModel unavailable: opencode/b-free'
+
+printf 'opencode/c-free\nopencode/d-free\n' >"$STUB_MODELS"
+fm refresh
+printf 'anthropic/paid\n' >"$STUB_MODELS" && : >"$STUB_MODELS_LOG"
+STUB_GONE="opencode/c-free opencode/d-free" fm run "$T/wt" unit17 "$T/brief.md" >/dev/null 2>&1
+expect "a failed re-read is not retried for the next unavailable model" "$(grep -c . "$STUB_MODELS_LOG")" "1"
+expect "a failed re-read keeps the old list, and its models cool down" "$(fm list | grep -c 'cooling down')" "2"
 
 fm bogus >/dev/null 2>&1
 expect "an unknown command exits 1" "$?" "1"
