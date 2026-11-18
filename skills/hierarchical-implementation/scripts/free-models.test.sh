@@ -185,7 +185,7 @@ printf 'opencode/c-free\nopencode/d-free\n' >"$STUB_MODELS"
 fm refresh
 printf 'anthropic/paid\n' >"$STUB_MODELS" && : >"$STUB_MODELS_LOG"
 STUB_GONE="opencode/c-free opencode/d-free" fm run "$T/wt" unit17 "$T/brief.md" >/dev/null 2>&1
-expect "a failed re-read is not retried for the next unavailable model" "$(wc -l <"$STUB_MODELS_LOG")" "1"
+expect "a failed re-read is not retried for the next unavailable model" "$(grep -c . "$STUB_MODELS_LOG")" "1"
 expect "a failed re-read keeps the old list, and its models cool down" "$(fm list | grep -c 'cooling down')" "2"
 
 fm bogus >/dev/null 2>&1
