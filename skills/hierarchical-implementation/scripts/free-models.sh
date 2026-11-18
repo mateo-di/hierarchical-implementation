@@ -219,11 +219,11 @@ run() {
       2) fallback "$err" ;;
     esac
     # opencode refused the model before it ran, so its list may have changed since the daily
-    # refresh: re-read it, once per run. A model it no longer offers leaves the registry, with no
-    # retry note since nothing ran; one it still lists cools down like any failure.
-    if [[ $err == "Model unavailable: $model"* && -z $relisted ]] && refresh 2>/dev/null; then
+    # refresh: re-read it, once per run even when the read fails. A model it no longer offers leaves
+    # the registry, with no retry note since nothing ran; one it still lists cools down like any failure.
+    if [[ $err == "Model unavailable: $model"* && -z $relisted ]]; then
       relisted=1
-      [[ $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
+      refresh 2>/dev/null && [[ $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
     fi
     mark "$model" fail "$err"
     note=$RETRY_NOTE
