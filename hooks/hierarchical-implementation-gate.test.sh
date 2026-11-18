@@ -163,6 +163,32 @@ report=$(bash "$HOOK" report)
 report=$(DELEGATION_LOG="$T/empty.tsv" bash "$HOOK" report)
 [[ $report != *s3* ]] && pass "report with an empty decision log does not read events as decisions" || fail "report: $report"
 
+# a free-model worker started through the skill's script counts like an Agent worker
+free() { tool PostToolUse Bash "${2:-sfree}" "$(jq -cn --arg c "$1" '{command:$c}')"; }
+runs "decide delegate for a free-model worker" 0 bash "$HOOK" decide "$W" sfree delegate "parser unit on a free model"
+check none "a Bash call that is not a free-model worker is not logged" "$(free "git status")"
+check deny "delegated: an unrelated Bash call is not a worker" "$(edit "$W/src/a.ts" sfree)"
+check none "a free-model worker run is logged after the Bash call" "$(free "/x/scripts/free-models.sh run $W parser /tmp/brief.md 2>&1")"
+check none "delegated: after a free-model worker the driver may integrate" "$(edit "$W/src/a.ts" sfree)"
+check none "continuing a free-model session is logged" "$(free "free-models.sh run --model opencode/x-free $W parser /tmp/fix.md ses_abc123")"
+check none "a quoted script path and a quoted session are logged" "$(free "\"\$D/free-models.sh\" run $W lexer /tmp/fix.md \"\$SID\"")"
+events=$(grep sfree "$DELEGATION_EVENTS" | cut -f3-6)
+[[ $events == $'spawn\tparser\tfree\tfree-models\nmessage\tparser\topencode/x-free\tfree-models\nmessage\tlexer\tfree\tfree-models' ]] &&
+  pass "free-model events log kind, worker name, model and the free-models type" || fail "events: $events"
+# a mention of the script, or a chained command, is not a worker
+runs "decide delegate for mentions of the script" 0 bash "$HOOK" decide "$W" sfp delegate "parser unit on a free model"
+for c in "echo free-models.sh run a b c" \
+  "grep \"free-models.sh run <worktree> <name> <brief-file>\" SKILL.md" \
+  "git commit -m \"feat: free-models.sh run logs as a spawn\"" \
+  "false && free-models.sh run $W parser /tmp/brief.md" \
+  "free-models.sh run $W parser /tmp/brief.md; rm -rf $W" \
+  "free-models.sh run $W parser /tmp/brief.md | tee log" \
+  "free-models.sh run $W parser \$(cat x)"; do
+  free "$c" sfp >/dev/null
+done
+[[ -z $(grep sfp "$DELEGATION_EVENTS") ]] && pass "mentions and chained commands are not logged" || fail "events: $(grep sfp "$DELEGATION_EVENTS")"
+check deny "delegated: a mention of the script is not a worker" "$(edit "$W/src/a.ts" sfp)"
+
 # Bash: the decide command is approved
 check approve "the gate's own decide command is approved" "$(shell s4 "$HOOK decide $W s4 direct \"trivial: one line typo fix\"")"
 check approve "a security decide with files is approved" "$(shell s4 "$HOOK decide $W s4 direct \"security: edits the gate itself\" src/a.ts hooks/x.json")"

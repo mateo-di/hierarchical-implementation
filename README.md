@@ -48,7 +48,7 @@ There are three layers.
   - `lane`, `opt-out`, `no-subagents`: the whole worktree. `lane` is refused in a session started with `LANE_MODE=driver`, which a lane spawner such as `herdr-spawn --lane driver` exports.
 - **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
 - **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root.
-- **Logging.** Worker spawns and `SendMessage` calls are logged.
+- **Logging.** Worker spawns, `SendMessage` calls and `free-models.sh run` commands are logged.
 
 ```bash
 hierarchical-implementation-gate.sh decide <worktree> <session> delegate "<units>"
@@ -75,10 +75,36 @@ The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cac
 
 Set these in the environment Claude Code starts with.
 
+### Free-model workers (optional)
+
+With `HI_FREE_WORKERS=1` and [opencode](https://opencode.ai) installed, the skill tries each editing unit on a free model first, through `skills/hierarchical-implementation/scripts/free-models.sh`. That script runs a headless `opencode run` in the worktree and records which free models work. A model that fails, or prints nothing for a while (opencode retries rate limits silently), cools down and is retried later. When no free model finishes, the script exits 3 and the driver uses a normal Agent worker. A model the user names runs through `--model`: once, with no cooldown and no fallback, and exit 1 when it cannot run or finish. The hook logs each run as a worker spawn, so it satisfies `delegate`.
+
+The run approves every permission its opencode agent leaves at "ask", so it needs a restricted agent. Install the example, which denies everything except file tools inside the worktree, git read commands and common test runners:
+
+```bash
+cp examples/opencode-lane-worker.md ~/.config/opencode/agents/lane-worker.md
+```
+
+Without it the script runs no model and the driver falls back. The agent narrows what the model can call. It is not a sandbox: a test runner executes the repo's code.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `HI_FREE_WORKERS` | unset | `1` turns free-model workers on |
+| `HI_FREE_MODELS_PREFER` | empty | Space-separated model ids to try first |
+| `HI_FREE_AGENT` | `lane-worker` | opencode agent the worker runs as |
+| `HI_FREE_COOLDOWN` | `3600` | Seconds a failed model is skipped |
+| `HI_FREE_MAX_TRIES` | `3` | Models tried per unit before falling back |
+| `HI_FREE_TIMEOUT` | `1800` | Seconds one attempt may take |
+| `HI_FREE_STALL` | `300` | Seconds one attempt may print nothing before it counts as failed |
+| `HI_FREE_REGISTRY` | `…/hierarchical-implementation/free-models.json` | Registry under `$XDG_STATE_HOME` |
+
+Free models come and go, and some providers keep or train on prompts. Check each provider's terms before sending it code.
+
 ## Tests
 
 ```bash
 bash hooks/hierarchical-implementation-gate.test.sh
+bash skills/hierarchical-implementation/scripts/free-models.test.sh
 ```
 
 ## What it does not enforce
@@ -86,7 +112,7 @@ bash hooks/hierarchical-implementation-gate.test.sh
 The gate is a speed bump, not a barrier. It makes skipping delegation a deliberate, logged act. A model set on getting around it can still write files in ways the hook doesn't see.
 
 - **Whether a review was critical.** The log shows that messages were sent, not whether they were right.
-- **Which worktree a worker serves.** Any named editing worker spawned in the session satisfies `delegate`, including one spawned for another worktree. A spawned worker can also edit outside the files it owns; the skill has the driver check `git diff --name-only`.
+- **Which worktree a worker serves.** Any named editing worker spawned in the session satisfies `delegate`, including one spawned for another worktree. A `free-models.sh run` counts once it starts, even if it then exits 3. A spawned worker can also edit outside the files it owns; the skill has the driver check `git diff --name-only`.
 - **Other shell writes.** The hook doesn't recognize:
   - `cp`, `mv`, `patch`, `git apply` or scripts;
   - writes inside `$(...)`;
