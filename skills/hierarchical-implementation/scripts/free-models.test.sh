@@ -49,6 +49,10 @@ if [[ " ${STUB_STALL:-} " == *" $model "* ]]; then # opencode starts the step, t
   sleep 60
   exit 0
 fi
+if [[ " ${STUB_GONE:-} " == *" $model "* ]]; then # opencode no longer offers the model
+  printf '{"type":"error","error":{"type":"unknown","message":"Model unavailable: %s"}}\n' "$model"
+  exit 1
+fi
 if [[ " ${STUB_FAIL:-} " == *" $model "* ]]; then
   printf '{"type":"error","sessionID":"%s","error":{"type":"rate-limit","message":"rate limited"}}\n' "$session"
   exit 1
@@ -162,6 +166,12 @@ printf 'opencode/a-free\nopencode/new-free\n' >"$STUB_MODELS"
 jq '.refreshed = 0' "$HI_FREE_REGISTRY" >"$T/r" && mv "$T/r" "$HI_FREE_REGISTRY"
 fm run "$T/wt" unit12 "$T/brief.md" >/dev/null
 expect "a day-old registry refreshes before a run" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free opencode/new-free"
+
+: >"$STUB_LOG"
+STUB_GONE="opencode/new-free" HI_FREE_MODELS_PREFER="opencode/new-free" fm run "$T/wt" unit15 "$T/brief.md" >/dev/null 2>&1
+expect "a model opencode no longer offers hands over to the next" "$(calls)" "opencode/new-free opencode/a-free "
+expect "a model opencode no longer offers leaves the registry" "$(jq -r '.models | keys_unsorted | join(" ")' "$HI_FREE_REGISTRY")" "opencode/a-free"
+grep -q '^opencode/a-free|[^|]*|[^|]*|An earlier attempt' "$STUB_LOG" && fail "a model that never ran sent the retry note" || pass "a model that never ran sends no retry note"
 
 fm bogus >/dev/null 2>&1
 expect "an unknown command exits 1" "$?" "1"

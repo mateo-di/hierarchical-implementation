@@ -2,7 +2,8 @@
 # Free-model workers for the hierarchical-implementation skill. Runs one unit's brief through a
 # headless `opencode run` on a free model, so the worker costs no paid tokens, and keeps a registry
 # of which free models work. A model that fails or stalls cools down and is tried again once the
-# cooldown ends; the list refreshes itself from `opencode models` once a day. A free model is never
+# cooldown ends, and one opencode reports unavailable leaves the list; the list refreshes itself
+# from `opencode models` once a day. A free model is never
 # a blocker: when none finishes the unit, the script exits 3 and the driver falls back to a normal
 # Agent-tool worker. Written for bash 3.2, the macOS default.
 #
@@ -214,6 +215,10 @@ run() {
       0) mark "$model" ok; return 0 ;;
       2) fallback "$err" ;;
     esac
+    if [[ $err == "Model unavailable"* ]]; then # opencode's own catalog dropped it, so it never ran; a refresh adds it back if it returns
+      update 'del(.models[$id])' --arg id "$model"
+      continue
+    fi
     mark "$model" fail "$err"
     note=$RETRY_NOTE
   done
