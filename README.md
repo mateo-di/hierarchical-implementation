@@ -1,6 +1,6 @@
 # hierarchical-implementation
 
-A Claude Code plugin that makes worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result critically, sends corrections to the same worker, and integrates. A hook holds the driver to that: it must decide before its first edit, and each decision only allows what it claims.
+A Claude Code plugin that makes worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result critically, sends corrections to the same worker, and integrates. A hook holds the driver to that: it must decide before its first edit or first worker, and each decision only allows what it claims.
 
 ## Install
 
@@ -42,6 +42,7 @@ There are three layers.
 ### The hook
 
 - **The first edit.** In a worktree under `HIERARCHICAL_GATE_ROOT`, the main thread's first edit is denied until the session records a decision. The deny reason works as a just-in-time prompt: Claude reads it at the moment it wants to edit. It carries the ready-to-run `decide` commands, the exemption list and the review loop. Subagents are never gated.
+- **The first worker.** While the session works in such a worktree, its first worker (the plugin's worker agent, or a `free-models.sh run`) is denied the same way, because a driver that only reviews may never edit and would leave no decision behind. Any decision of the session lets workers start, since they may edit another worktree. General-purpose agents and forks are not asked: sessions also spawn them to research and review.
 - **Recording a decision.** The hook approves its own `decide` command, but only in its exact form with inert arguments, so recording costs no permission prompt. Each decision is appended to a log.
 - **Each decision is held to its scope:**
   - `delegate`: the driver's edits are denied until it has spawned a named worker since it recorded `delegate`. A worker is an agent of one of `WORKER_TYPES` (general-purpose, the plugin's worker, a fork, a `free-models.sh run`), or a named agent with no type; read-only and bookkeeping agents don't count. After that, the driver's own edits count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
@@ -127,6 +128,7 @@ The gate is a speed bump, not a barrier. It makes skipping delegation a delibera
 
   Writes other than heredocs have no known size, so they don't count against the budget. The trivial cap also reads git's diff of its files, so it sees them until they are committed. A command that writes more than 20 files is denied.
 - **Lines that never landed.** The hook counts an edit before it runs, so an edit that fails, that the user rejects, or a command denied at a later target still counts against the caps.
+- **Workers the hook does not count.** A driver that never edits itself records no decision, so `report` does not list it, when it delegates through general-purpose workers instead of the plugin's agent, works from a directory outside `HIERARCHICAL_GATE_ROOT`, or runs `free-models.sh` in a form the hook does not recognize.
 - **Inherited lane mode.** `LANE_MODE=unit` stays in the lane pane's shell after the lane ends, so a later session there may still record `lane`. Each recording is logged.
 - **Repeated decisions.** Recording `trivial` again frees its files for a new task, and the log shows every repeat. Line counts carry over.
 - **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows, and `opt-out` is taken on trust.

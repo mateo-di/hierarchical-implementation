@@ -320,6 +320,33 @@ check none "an unnamed agent is allowed" "$(tool PreToolUse Agent s1 '{"prompt":
 check none "a fork is allowed" "$(tool PreToolUse Agent s1 '{"name":"f1","prompt":"x","subagent_type":"fork"}')"
 check none "a session the gate never saw is not asked for a model" "$(tool PreToolUse Agent fresh '{"name":"w1","prompt":"x"}')"
 
+# a worker, like the first edit, needs a decision, so a task that only delegates still records one
+worker='{"name":"w1","model":"sonnet","prompt":"x","subagent_type":"hierarchical-implementation:worker"}'
+check deny "the plugin's worker before any decision is denied" "$(tool PreToolUse Agent sw0 "$worker")"
+says "the spawn deny gives the decide command, the exemptions and the reader type" "$(tool PreToolUse Agent sw0 "$worker")" "decide $W sw0 delegate" "trivial, security" "spawn it as Explore"
+check deny "an unnamed worker of the plugin's type is denied too" "$(tool PreToolUse Agent sw0 '{"model":"sonnet","prompt":"x","subagent_type":"worker"}')"
+check deny "the worker type is matched the way Claude Code folds it" "$(tool PreToolUse Agent sw0 '{"model":"sonnet","prompt":"x","subagent_type":"Hierarchical_Implementation:Worker"}')"
+check deny "a free-model worker before any decision is denied" "$(shell sw0 "/x/scripts/free-models.sh run $W parser /tmp/brief.md 2>&1")"
+check none "a free-model continuation is not a first worker" "$(shell sw0 "/x/scripts/free-models.sh run $W parser /tmp/fix.md ses_abc123")"
+check none "a named general-purpose agent, which may only research, is not asked" "$(tool PreToolUse Agent sw0 '{"name":"hunt","model":"sonnet","prompt":"x"}')"
+check none "an explicit general-purpose agent is not asked" "$(tool PreToolUse Agent sw0 '{"name":"hunt","model":"sonnet","prompt":"x","subagent_type":"general-purpose"}')"
+check none "a fork is not asked" "$(tool PreToolUse Agent sw0 '{"name":"f1","prompt":"x","subagent_type":"fork"}')"
+check none "a named reader before any decision is allowed" "$(tool PreToolUse Agent sw0 '{"name":"scout","model":"sonnet","prompt":"x","subagent_type":"Explore"}')"
+check none "a session working outside the root is not asked for a decision" "$(tool PreToolUse Agent sw0 "$worker" "$T/other")"
+out=$(XDG_STATE_HOME="$T/not-a-dir" bash "$HOOK" <<<"$(tool PreToolUse Agent sw0 "$worker")")
+[[ -z $out ]] && pass "a state dir that cannot be written lets the worker start" || fail "unwritable state dir still denied the worker"
+denied=$(awk -F'\t' '$2 == "sw0" && $3 == "deny" && $6 == "undecided" {print $4}' "$DELEGATION_EVENTS" | sort -u | tr '\n' ' ')
+[[ $denied == "Agent Bash " ]] && pass "an undecided spawn is logged as an undecided denial" || fail "deny events for sw0: $denied"
+runs "decide delegate before the first worker" 0 bash "$HOOK" decide "$T/other" sw0 delegate "parser unit for one worker"
+check none "a decision in another worktree lets the named worker start" "$(tool PreToolUse Agent sw0 "$worker")"
+check none "a decision lets the free-model worker start" "$(shell sw0 "/x/scripts/free-models.sh run $W parser /tmp/brief.md 2>&1")"
+check deny "after a decision a named worker still needs a model" "$(tool PreToolUse Agent sw0 '{"name":"w2","prompt":"x","subagent_type":"worker"}')"
+mkdir -p "$T/st[1]" "$T/st1"
+XDG_STATE_HOME="$T/st[1]" bash "$HOOK" decide "$W" sw1 delegate "parser unit for one worker" >/dev/null 2>&1
+mkdir -p "$T/st1/claude-gates/delegation/sw1" # a glob would read st[1] as st1 and find no decision here
+out=$(XDG_STATE_HOME="$T/st[1]" bash "$HOOK" <<<"$(tool PreToolUse Agent sw1 "$worker")")
+[[ -z $out ]] && pass "a decision under a state path with glob characters is found" || fail "decision under st[1] not found"
+
 # edit sizes and state hold up against replace_all, git config and parallel calls
 runs "decide trivial for replace_all" 0 bash "$HOOK" decide "$W" s9 direct "trivial: one word swap in r"
 once=$(jq -cn --arg p "$W/src/r.ts" '{tool_input:{file_path:$p,old_string:"x",new_string:"y"}}')
