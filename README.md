@@ -27,7 +27,7 @@ Existing decisions and logs under `~/.local/state/claude-gates/` keep working.
 
 There are three layers.
 
-1. **Policy** ([examples/CLAUDE.md](examples/CLAUDE.md)). Delegation is the default for anything beyond a trivial edit, and Claude does not ask before spawning editing workers.
+1. **Policy** ([examples/CLAUDE.md](examples/CLAUDE.md)). Delegation is the default for anything beyond a small edit, and Claude does not ask before spawning editing workers.
 2. **Procedure** ([skills/hierarchical-implementation/SKILL.md](skills/hierarchical-implementation/SKILL.md)). The skill covers:
    - splitting work into units, one todo per unit (a coupled change is one unit);
    - what goes into a brief;
@@ -35,6 +35,8 @@ There are three layers.
    - critical review: accept, correct or redo;
    - corrections through `SendMessage`, at most three rounds per unit;
    - integration.
+
+   Workers run as [agents/worker.md](agents/worker.md) (`hierarchical-implementation:worker`): file and shell tools only, its own rules and a short report format. A general-purpose agent loads every tool schema, skill listing and MCP server instruction; in the author's setup it started at 89,285 tokens against 29,727 for a tool-restricted agent, and a worker carries that context on every call.
 3. **Enforcement** ([hooks/hierarchical-implementation-gate.sh](hooks/hierarchical-implementation-gate.sh), registered by [hooks/hooks.json](hooks/hooks.json)).
 
 ### The hook
@@ -42,13 +44,14 @@ There are three layers.
 - **The first edit.** In a worktree under `HIERARCHICAL_GATE_ROOT`, the main thread's first edit is denied until the session records a decision. The deny reason works as a just-in-time prompt: Claude reads it at the moment it wants to edit. It carries the ready-to-run `decide` commands, the exemption list and the review loop. Subagents are never gated.
 - **Recording a decision.** The hook approves its own `decide` command, but only in its exact form with inert arguments, so recording costs no permission prompt. Each decision is appended to a log.
 - **Each decision is held to its scope:**
-  - `delegate`: the driver's edits are denied until it has spawned a named worker that can edit. Read-only `Explore` and `Plan` agents don't count. After that, the driver's own edits count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
-  - `trivial`: one file, up to a cap of changed lines.
-  - `security`: only the files named when it was recorded. "Security" means the agent's own controls (hooks, gates, agent settings and permissions, `CLAUDE.md`, `AGENTS.md`, skill and agent definitions) or secret values. Repo ownership, CI and IAM files go to workers.
-  - `lane`, `opt-out`, `no-subagents`: the whole worktree. `lane` is refused in a session started with `LANE_MODE=driver`, which a lane spawner such as `herdr-spawn --lane driver` exports.
+  - `delegate`: the driver's edits are denied until it has spawned a named worker since it recorded `delegate`. A worker is an agent of one of `WORKER_TYPES` (general-purpose, the plugin's worker, a fork, a `free-models.sh run`), or a named agent with no type; read-only and bookkeeping agents don't count. After that, the driver's own edits count against an integration budget of changed lines per worktree. Past the budget, the edit is authoring and should go to a worker.
+  - `trivial`: up to 3 files and a cap of changed lines in all. The cap sums the lines the driver's edits change (context an edit repeats unchanged does not count), so neither a commit nor recording `trivial` again resets it.
+  - `security`: only the files named when it was recorded, each of which must match `SECURITY_PATHS`; `decide` refuses other files, and each edit is checked again, since `decide` runs in an environment the model sets. "Security" means the agent's own controls (hooks, gates, agent settings and permissions, `CLAUDE.md`, `AGENTS.md`, skill and agent definitions, also as chezmoi sources) or data and config files that hold secrets, not the code that handles them. A plugin's `hooks/`, `skills/`, `agents/` and `commands/` count too, where a tracked `.claude-plugin/plugin.json` marks the plugin. Repo ownership, CI and IAM files go to workers.
+  - `lane`: the whole worktree, only in a session started with `LANE_MODE=unit`, which a lane spawner such as `herdr-spawn --lane unit` exports. The session records `lane` itself: the variable outlives the lane in its pane's shell, so the gate does not exempt a later session there without a decision.
+  - `opt-out`, `no-subagents`: the whole worktree.
 - **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
 - **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root.
-- **Logging.** Worker spawns, `SendMessage` calls and `free-models.sh run` commands are logged.
+- **Logging.** Worker spawns, `SendMessage` calls, `free-models.sh run` commands and denials are logged.
 
 ```bash
 hierarchical-implementation-gate.sh decide <worktree> <session> delegate "<units>"
@@ -57,9 +60,9 @@ hierarchical-implementation-gate.sh decide <worktree> <session> direct "security
 hierarchical-implementation-gate.sh report
 ```
 
-The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cache/`. Recording a decision again resets which file `trivial` covers and adds files to `security`. It keeps the `delegate` budget, so recording `delegate` again does not refill it.
+The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cache/`. Recording a decision again resets which files `trivial` covers and adds files to `security`. It keeps both line counts and the time `delegate` was first recorded, so recording again refills nothing.
 
-`report` prints each session's decisions with its spawn and message counts. `delegate` sessions with spawns but no messages suggest reviews that never sent a correction.
+`report` prints each session's decisions with its worker, message and denial counts; only messages to the session's own workers, by name, count. A session that was denied but never decided shows as `undecided`. `delegate` sessions with workers but no messages suggest reviews that never sent a correction.
 
 ## Configuration
 
@@ -67,11 +70,14 @@ The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cac
 |---|---|---|
 | `HIERARCHICAL_GATE_ROOT` | `~/vscode` | Only paths under this directory are gated |
 | `HIERARCHICAL_GATE` | `on` | `off` disables the hook |
-| `TRIVIAL_MAX_LINES` | `20` | Changed-line cap for a trivial exemption |
+| `TRIVIAL_MAX_LINES` | `60` | Changed-line cap for a trivial exemption, per worktree and session |
+| `TRIVIAL_MAX_FILES` | `3` | Files a trivial exemption covers |
 | `INTEGRATE_MAX_LINES` | `60` | Driver's changed-line budget per worktree under delegate |
+| `SECURITY_PATHS` | agent-control and secrets paths | Extended regex a security file's path, relative to the worktree, must match |
+| `WORKER_TYPES` | `general-purpose\|worker\|hierarchical-implementation:worker\|fork\|free-models` | Agent types that count as a worker under delegate; `free-models` is the type logged for a `free-models.sh run`, so keep it in an override |
 | `XDG_STATE_HOME` | `~/.local/state` | Per-session state lives under `$XDG_STATE_HOME/claude-gates/delegation/` |
 | `DELEGATION_LOG` | `…/claude-gates/delegation-decisions.tsv` | Decisions: time, session, worktree, choice, reason, named files |
-| `DELEGATION_EVENTS` | `…/claude-gates/delegation-events.tsv` | Spawns and messages: time, session, kind, target, model, agent type |
+| `DELEGATION_EVENTS` | `…/claude-gates/delegation-events.tsv` | Spawns, messages and denials: time, session, kind, target (the tool for a denial), model, agent type (for a denial, its kind: `undecided`, `no-worker`, `budget`, `trivial-files`, `trivial-lines`, `security`, `lane`, `model`, `too-many-files` or `newline`) |
 
 Set these in the environment Claude Code starts with.
 
@@ -112,16 +118,18 @@ bash skills/hierarchical-implementation/scripts/free-models.test.sh
 The gate is a speed bump, not a barrier. It makes skipping delegation a deliberate, logged act. A model set on getting around it can still write files in ways the hook doesn't see.
 
 - **Whether a review was critical.** The log shows that messages were sent, not whether they were right.
-- **Which worktree a worker serves.** Any named editing worker spawned in the session satisfies `delegate`, including one spawned for another worktree. A `free-models.sh run` counts once it starts, even if it then exits 3. A spawned worker can also edit outside the files it owns; the skill has the driver check `git diff --name-only`.
+- **Which worktree a worker serves.** Any worker spawned in the session after the decision satisfies `delegate`, including one spawned for another worktree. A `free-models.sh run` counts once it starts, even if it then exits 3. A spawned worker can also edit outside the files it owns; the skill has the driver check `git diff --name-only`.
 - **Other shell writes.** The hook doesn't recognize:
   - `cp`, `mv`, `patch`, `git apply` or scripts;
   - writes inside `$(...)`;
   - targets built from variables other than `$HOME`;
   - the PowerShell tool.
 
-  Writes other than heredocs have no known size, so they don't count against the budget or the trivial cap. A command that writes more than 20 files is denied.
-- **Repeated decisions and commits.** Recording `trivial` again frees its file for a new task, and the log shows every repeat. The trivial cap measures the file against `HEAD`, so a commit resets it.
-- **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows.
+  Writes other than heredocs have no known size, so they don't count against the budget. The trivial cap also reads git's diff of its files, so it sees them until they are committed. A command that writes more than 20 files is denied.
+- **Lines that never landed.** The hook counts an edit before it runs, so an edit that fails, that the user rejects, or a command denied at a later target still counts against the caps.
+- **Inherited lane mode.** `LANE_MODE=unit` stays in the lane pane's shell after the lane ends, so a later session there may still record `lane`. Each recording is logged.
+- **Repeated decisions.** Recording `trivial` again frees its files for a new task, and the log shows every repeat. Line counts carry over.
+- **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows, and `opt-out` is taken on trust.
 - **Errors and timeouts.** The hook fails open on any resolution error. If it takes longer than its timeout, Claude Code lets the call through. Commands of about 20 KB take around half a second.
 
 ## Background
@@ -134,10 +142,16 @@ One long session showed two gaps:
 
 Named files for `security` and the line cap for `trivial` come from that session. The spawn requirement and the integration budget close the gap where `delegate` was taken on trust. The log has no case of `delegate` being abused.
 
+A later review covered 248 decisions and the token usage in their sessions' transcripts. It found:
+- `security` was the most used decision (71). Before it named files, most lines edited under it were outside agent-control paths: chart templates, CI scripts. With named files about a tenth still were, half of them a settings template that the path list now covers. `decide` and each edit now check the paths.
+- Changes of 40 lines or fewer cost a median of about 3 to 4 times as many tokens delegated as done directly, partly because a 1-file, 20-line `trivial` cap pushed code plus its test into delegation. The sample is small (11 delegated changes of that size). The cap is now 3 files and 60 lines.
+- Two holes were open in the code with no case in the log: a commit reset the `trivial` cap, and a named agent of any type spawned before the decision satisfied `delegate`. Both are closed.
+- Drivers reread diffs and reran checks their workers had already run. The skill now has the worker report a diffstat and pass/fail, and the driver run the checks once.
+
 ## Notes
 
 - The skill and the deny text mention a `/repro` gate. That separate hook blocks source edits until a bug is reproduced, and it is not part of this plugin. The references are harmless without it.
-- The skill suggests Claude Opus for the driver and Claude Sonnet for editing workers. It asks before switching the main session's model.
+- The skill uses Claude Sonnet for editing workers unless the user names another model.
 
 ## License
 
