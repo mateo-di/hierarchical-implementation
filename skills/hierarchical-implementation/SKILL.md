@@ -89,8 +89,9 @@ and ask. Never substitute another model.
 ## The gate
 
 The `hierarchical-implementation-gate.sh` hook denies the main thread's first edit in a `~/vscode`
-worktree until the session records a decision with the `decide` command its message prints,
-which the hook approves itself, then holds each decision to its scope. It also requires `model`
+worktree, and its first worker (the plugin's agent or a free-model run) while it works in one,
+until the session records a decision with the `decide` command its message prints. The hook
+approves that command itself, then holds each decision to its scope. It also requires `model`
 on named worker calls, and logs decisions, spawns, messages and denials, which its `report`
 command summarizes. It cannot classify work or judge whether a review was critical. This skill
 and project rules do not override user instructions or the harness.

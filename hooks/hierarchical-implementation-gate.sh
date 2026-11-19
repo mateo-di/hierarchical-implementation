@@ -2,8 +2,10 @@
 # Hook and decision CLI behind the hierarchical-implementation skill. Implementation runs through
 # worker subagents by default: the main thread briefs, reviews, sends corrections and integrates.
 # So its first edit in a worktree under the implementation root is denied until the session records
-# a decision: delegate, or direct with one of EXEMPTIONS. Coupling is not an exemption: a coupled
-# change goes whole to one worker. Subagents are never gated (their hook input carries agent_id).
+# a decision: delegate, or direct with one of EXEMPTIONS. So is its first worker (the plugin's worker
+# agent or a free-model run) while it works in such a worktree, since a driver that only reviews
+# may never edit. Coupling is not an exemption: a coupled change goes whole to one worker.
+# Subagents are never gated (their hook input carries agent_id).
 #
 # Each decision is judged before the task's size shows, so each one is held to what it claims:
 #   delegate   the driver edits only after it spawned a worker (a named agent of WORKER_TYPES, or a
@@ -21,10 +23,10 @@
 #
 # Before a tool runs (hooks/hooks.json lists which), the hook gates file edits and the shell writes
 # shell_targets recognizes, approves this script's own decide command so recording costs no
-# permission prompt, and requires a model on named workers in sessions it has seen. After an agent
-# spawn or a message, or a Bash call that runs the skill's free-model worker (free-models.sh run),
-# it logs the event to DELEGATION_EVENTS, which delegate and report read; each denial is logged
-# there too, with the tool and a kind.
+# permission prompt, holds worker spawns to a decision, and requires a model on named workers in
+# sessions it has seen. After an agent spawn or a message, or a Bash call that runs the skill's
+# free-model worker (free-models.sh run), it logs the event to DELEGATION_EVENTS, which delegate and
+# report read; each denial is logged there too, with the tool and a kind.
 #
 # It is a speed bump that makes skipping delegation a deliberate, logged act, not a barrier: a model
 # set on getting around it can write files in ways it does not see.
@@ -72,6 +74,11 @@ SECURITY_PATHS="${SECURITY_PATHS:-(^|/)(CLAUDE|AGENTS|GEMINI)(\.local)?\.md(\.tm
 # free-models is the type this hook logs for a free-models.sh run, so an override keeps it.
 # Specialists that only read, plan or keep records do not count.
 WORKER_TYPES="${WORKER_TYPES:-general-purpose|worker|hierarchical-implementation:worker|fork|free-models}"
+# The worker types that exist only to edit a unit, so a spawn of one starts a delegated task and
+# needs a decision first; general-purpose agents and forks also research and review. Written
+# folded the way Claude Code matches a subagent_type: lowercase, without spaces, dashes or
+# underscores.
+UNIT_WORKER_TYPES='worker|hierarchicalimplementation:worker'
 MAX_TARGETS=20 # distinct files one shell command may write; more is denied, which bounds the hook's run time
 EXEMPTIONS='trivial|security|lane|opt-out|no-subagents'
 PLAIN_SET='[A-Za-z0-9._/@+-]'
@@ -220,8 +227,9 @@ record() { # record <base> <top> <choice> <reason> [named file...]: writes a dec
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$top" "$choice" "$reason" "$*" >>"$DELEGATION_LOG"
 }
 
-# The policy these texts state also lives in SKILL.md, README.md, examples/CLAUDE.md and the user's
-# CLAUDE.md, and the test suite pins parts of it; change them together.
+# The policy these texts and undecided_spawn's deny state also lives in SKILL.md, README.md,
+# examples/CLAUDE.md and the user's CLAUDE.md, and the test suite pins parts of it; change them
+# together.
 delegate_how() { # delegate_how <top>
   printf '%s' "run $0 decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill (hierarchical-implementation:hierarchical-implementation when installed as a plugin), and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a named worker (subagent_type hierarchical-implementation:worker, or general-purpose) with model set, including the file in this edit. Review each result critically, send numbered corrections to the same worker with SendMessage or re-brief a fresh worker, stop after three rounds, and edit here only to integrate. While a /repro gate is open here, the worker works in this worktree."
 }
@@ -316,6 +324,20 @@ scope() { # scope <base> <top> <changed lines> -> prints a deny when the recorde
       ;;
     direct:*) ;; # opt-out, no-subagents and reasons from older versions cover the whole worktree
   esac
+}
+
+undecided_spawn() { # undecided_spawn -> prints a deny when the session, working in a worktree under the root, starts a worker before recording any decision
+  # A driver that only reviews never edits, so without this a fully delegated task leaves no
+  # decision behind. The callers decide what counts as a worker (UNIT_WORKER_TYPES, or the skill's
+  # free-model run). Any decision of the session counts, since its workers may edit another
+  # worktree than the one it runs in.
+  local here top gitdir f dir=$STATE_DIR/delegation/$session
+  [[ $session =~ $SID ]] || return 0
+  here=$(cd "$cwd" 2>/dev/null && pwd -P) && [[ $here == "$root"/* ]] || return 0
+  repo_of "$here" && [[ $top =~ $PLAIN && $0 =~ $PLAIN ]] || return 0
+  mkdir -p "$dir" 2>/dev/null && [[ -w $dir ]] || return 0 # decide could not record here, so it could never clear the deny
+  for f in "$dir"/*.decision; do [[ -f $f ]] && return 0; done # the quoted prefix is matched literally
+  deny undecided "Record the decision before the first worker, as before the first edit, so every delegated task leaves one in the log: run $0 decide $top $session delegate \"<the units, plain words>\", naming the worktree the workers will edit if it is not $top, then retry this call. If the task is in fact one of the exemptions (${EXEMPTIONS//|/, }), $(direct_how "$top").$LANE_HINT An agent that only reads, reviews or researches needs no decision: spawn it as Explore."
 }
 
 own_decide() { # own_decide <command>: true when the command is exactly this script's decide call, with inert arguments, for the calling session
@@ -648,23 +670,32 @@ case $tool in
       jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:"records a hierarchical-implementation decision"}}'
       exit 0
     fi
-    case $cmd in *'>'* | *tee* | *sed* | *perl*) ;; *) exit 0 ;; esac # nothing else the tokenizer recognizes can write
-    count=0
-    while IFS=$'\t' read -r size target; do
-      [[ -n $target ]] || continue
-      count=$((count + 1))
-      if ((count > MAX_TARGETS)); then
-        kind=too-many-files reason="This command writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller commands."
-        break
-      fi
-      out=$(gate "$target" "$size")
-      [[ -z $out ]] || { kind=${out%%"$US"*} reason="This command writes $target, which the gate treats like an edit. ${out#*"$US"}"; break; }
-    done < <(shell_targets "$cmd")
+    if [[ $tool == Bash && $cmd =~ $FREE_RUN && -z ${BASH_REMATCH[7]} ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+      kind=${out%%"$US"*} reason=${out#*"$US"}
+    else
+      case $cmd in *'>'* | *tee* | *sed* | *perl*) ;; *) exit 0 ;; esac # nothing else the tokenizer recognizes can write
+      count=0
+      while IFS=$'\t' read -r size target; do
+        [[ -n $target ]] || continue
+        count=$((count + 1))
+        if ((count > MAX_TARGETS)); then
+          kind=too-many-files reason="This command writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller commands."
+          break
+        fi
+        out=$(gate "$target" "$size")
+        [[ -z $out ]] || { kind=${out%%"$US"*} reason="This command writes $target, which the gate treats like an edit. ${out#*"$US"}"; break; }
+      done < <(shell_targets "$cmd")
+    fi
     ;;
   Agent | Task)
-    [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] || exit 0
-    jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1 || exit 0
-    kind=model reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
+    type=$(jq -r '.tool_input.subagent_type // "" | tostring | ascii_downcase | gsub("[\\s_-]"; "")' <<<"$input" 2>/dev/null)
+    if [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+      kind=${out%%"$US"*} reason=${out#*"$US"}
+    else
+      [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] || exit 0
+      jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1 || exit 0
+      kind=model reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
+    fi
     ;;
 esac
 [[ -n $reason ]] || exit 0

@@ -1,5 +1,5 @@
 {
-  "description": "Delegation gate for the hierarchical-implementation skill: decide before the main thread edits, hold each decision to its scope, log worker spawns, messages and denials.",
+  "description": "Delegation gate for the hierarchical-implementation skill: decide before the main thread edits or starts a worker, hold each decision to its scope, log worker spawns, messages and denials.",
   "hooks": {
     "PreToolUse": [
       {
