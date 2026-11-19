@@ -34,6 +34,7 @@ There are three layers.
    - isolating workers in their own worktrees and branches;
    - critical review: accept, correct or redo;
    - corrections through `SendMessage`, at most three rounds per unit;
+   - best of N for a unit a test decides after three failed rounds, and a council of models for a costly design choice no test decides;
    - integration.
 
    Workers run as [agents/worker.md](agents/worker.md) (`hierarchical-implementation:worker`): file and shell tools only, its own rules and a short report format. A general-purpose agent loads every tool schema, skill listing and MCP server instruction; in the author's setup it started at 89,285 tokens against 29,727 for a tool-restricted agent, and a worker carries that context on every call.
