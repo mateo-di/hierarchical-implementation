@@ -17,7 +17,7 @@ W="$T/vscode/repo"
 git init -q -b main "$W"
 mkdir -p "$W/src" "$T/other"
 printf 'one\ntwo\n' >"$W/src/c.ts"
-seq 15 | sed 's/.*/x/' >"$W/src/r.ts"
+seq 40 | sed 's/.*/x/' >"$W/src/r.ts"
 git -C "$W" add src/c.ts src/r.ts
 git -C "$W" -c user.email=t@t -c user.name=t commit -q -m init
 git init -q -b main "$T/other"
@@ -102,45 +102,89 @@ runs "decide refused for a session that is not an id" 1 bash "$HOOK" decide "$W"
 runs "decide refused for security without files" 1 bash "$HOOK" decide "$W" s1 direct "security: edits the gate itself"
 runs "decide refused for files on a non-security decision" 1 bash "$HOOK" decide "$W" s1 direct "trivial: one-line typo fix" src/a.ts
 runs "decide refused for a security file outside the worktree" 1 bash "$HOOK" decide "$W" s1 direct "security: edits the gate itself" ../escape.ts
+runs "decide refused for a security file outside the control paths" 1 bash "$HOOK" decide "$W" s1 direct "security: edits the gate itself" src/a.ts
+runs "decide refused for a CI workflow under security" 1 bash "$HOOK" decide "$W" s1 direct "security: edits the deploy workflow" .github/workflows/ci.yml
+runs "decide refused for a top-level hooks dir outside a plugin" 1 bash "$HOOK" decide "$W" s1 direct "security: edits a react hook" hooks/useThing.ts
 
-# security covers only the named files
-runs "decide direct security with a reason and a file" 0 bash "$HOOK" decide "$W/src" s1 direct $'security: edits\tthe gate itself' src/a.ts
-check none "security: the named file is allowed" "$(edit "$W/src/a.ts")"
-check deny "security: an unnamed file is denied" "$(edit "$W/src/b.ts")"
-says "security deny names the scope, how to add a file, and not to re-record delegate" "$(edit "$W/src/b.ts")" \
+# security covers only the named files, and only agent-control or secret paths
+runs "decide direct security with a reason and a file" 0 bash "$HOOK" decide "$W/src" s1 direct $'security: edits\tthe gate itself' .claude/hooks/gate.sh
+check none "security: the named file is allowed" "$(edit "$W/.claude/hooks/gate.sh")"
+check deny "security: an unnamed file is denied" "$(edit "$W/CLAUDE.md")"
+says "security deny names the scope, how to add a file, and not to re-record delegate" "$(edit "$W/CLAUDE.md")" \
   "not one of them" "decide $W s1 direct" "would drop the security scope"
 s="" top="" choice="" why="" named="" extra=""
 IFS=$'\t' read -r _ s top choice why named extra <"$DELEGATION_LOG"
-[[ $s == s1 && $top == "$W" && $choice == direct && $why == "security: edits the gate itself" && $named == "$W/src/a.ts" && -z $extra ]] &&
+[[ $s == s1 && $top == "$W" && $choice == direct && $why == "security: edits the gate itself" && $named == "$W/.claude/hooks/gate.sh" && -z $extra ]] &&
   pass "decision logged with session, worktree, choice, a one-field reason and the named files" || fail "log line: $(cat "$DELEGATION_LOG")"
-runs "decide security again adds a file" 0 bash "$HOOK" decide "$W" s1 direct "security: also the hook registration" "$W/src/b.ts"
-check none "security: the added file is allowed" "$(edit "$W/src/b.ts")"
+runs "decide security again adds a file" 0 bash "$HOOK" decide "$W" s1 direct "security: also the agent rules" "$W/CLAUDE.md"
+check none "security: the added file is allowed" "$(edit "$W/CLAUDE.md")"
+for f in AGENTS.md skills/x/SKILL.md .codex/config.toml dot_claude/settings.json.tmpl private_dot_codex/config.toml \
+  dot_config/opencode/lib/gate.ts opencode.json config/.env.local deploy/secrets.yaml certs/server.pem \
+  private_dot_config/claude/settings.json exact_dot_claude/agents/x.md .chezmoitemplates/claude-settings.json.tmpl \
+  dot_aws/private_credentials config/secrets/prod.yaml; do
+  runs "security accepts $f" 0 bash "$HOOK" decide "$W" s1b direct "security: control path coverage check" "$f"
+done
+for f in src/secretsManager.ts .envrc docs/agents.md bin/keychain-secrets.sh src/auth/credentials.ts lib/secrets_manager.py; do
+  runs "security refuses $f" 1 bash "$HOOK" decide "$W" s1b direct "security: control path coverage check" "$f"
+done
+runs "SECURITY_PATHS replaces the control paths" 0 env SECURITY_PATHS='^src/' bash "$HOOK" decide "$W" s1b direct "security: a repo of its own controls" src/a.ts
+check deny "security: a file only an override on decide admitted is denied at edit time" "$(edit "$W/src/a.ts" s1b)"
+P="$T/vscode/plug"
+git init -q -b main "$P"
+mkdir -p "$P/.claude-plugin" "$P/plugins/eng/.claude-plugin"
+runs "security refuses a plugin's hooks without a tracked manifest" 1 bash "$HOOK" decide "$P" s1b direct "security: edits the plugin gate" hooks/gate.sh
+echo '{}' >"$P/.claude-plugin/plugin.json"
+echo '{}' >"$P/plugins/eng/.claude-plugin/plugin.json"
+git -C "$P" add .claude-plugin/plugin.json plugins/eng/.claude-plugin/plugin.json
+runs "security accepts a plugin's top-level hooks" 0 bash "$HOOK" decide "$P" s1b direct "security: edits the plugin gate" hooks/gate.sh agents/worker.md
+runs "security accepts a nested plugin's agents and skill scripts" 0 bash "$HOOK" decide "$P" s1b direct "security: edits the nested plugin" plugins/eng/agents/w.md plugins/eng/skills/x/scripts/run.sh
+runs "security refuses a plugin's README" 1 bash "$HOOK" decide "$P" s1b direct "security: edits the plugin readme" README.md
 
-# trivial covers one file and a few lines
+# trivial covers a few files and a capped number of changed lines in all
 check deny "a decision does not carry over to another session" "$(edit "$W/src/c.ts" s2)"
 runs "decide direct trivial" 0 bash "$HOOK" decide "$W" s2 direct "trivial: one-line typo fix"
 check none "trivial: the first file after the decision is allowed" "$(edit "$W/src/c.ts" s2)"
 check none "trivial: that same file stays allowed" "$(edit "$W/src/c.ts" s2)"
-check deny "trivial: a second file is denied" "$(edit "$W/src/b.ts" s2)"
-says "trivial deny says the task is not trivial and how to delegate" "$(edit "$W/src/b.ts" s2)" "covers one file" "decide $W s2 delegate"
-big=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 30)" '{tool_input:{file_path:$p,old_string:"one",new_string:$n}}')
+check none "trivial: a second file is allowed" "$(edit "$W/src/b.ts" s2)"
+check none "trivial: a third file is allowed" "$(edit "$W/src/d.ts" s2)"
+check deny "trivial: a fourth file is denied" "$(edit "$W/src/e.ts" s2)"
+says "trivial deny says the task is not trivial and how to delegate" "$(edit "$W/src/e.ts" s2)" "covers up to 3 files" "decide $W s2 delegate"
+big=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 70)" '{tool_input:{file_path:$p,old_string:"one",new_string:$n}}')
 check deny "trivial: an edit past the line cap is denied" "$(edit "$W/src/c.ts" s2 "$big")"
-multi=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 12)" '{tool_input:{file_path:$p,edits:[{old_string:"one",new_string:$n},{old_string:"two",new_string:$n}]}}')
+multi=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 32)" '{tool_input:{file_path:$p,edits:[{old_string:"one",new_string:$n},{old_string:"two",new_string:$n}]}}')
 check deny "trivial: a MultiEdit past the line cap is denied" "$(edit "$W/src/c.ts" s2 "$multi")"
-whole=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 30)" '{tool_name:"Write",tool_input:{file_path:$p,content:$n}}')
+whole=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 70)" '{tool_name:"Write",tool_input:{file_path:$p,content:$n}}')
 check deny "trivial: a Write past the line cap is denied" "$(edit "$W/src/c.ts" s2 "$whole")"
-lines 30 >>"$W/src/c.ts"
+lines 70 >>"$W/src/c.ts"
 check deny "trivial: a file already past the line cap is denied" "$(edit "$W/src/c.ts" s2)"
 git -C "$W" checkout -q -- src/c.ts
 runs "decide trivial again" 0 bash "$HOOK" decide "$W" s2 direct "trivial: another one-line fix"
-check none "trivial: recording again frees the file it covers" "$(edit "$W/src/b.ts" s2)"
+check none "trivial: recording again frees the files it covers" "$(edit "$W/src/e.ts" s2)"
+runs "decide trivial for the cumulative cap" 0 bash "$HOOK" decide "$W" s2b direct "trivial: a few small edits"
+step=$(jq -cn --arg p "$W/src/c.ts" --arg n "$(lines 24)" '{tool_input:{file_path:$p,old_string:"one",new_string:$n}}')
+check none "trivial: a first 25-line edit is allowed" "$(edit "$W/src/c.ts" s2b "$step")"
+git -C "$W" -c user.email=t@t -c user.name=t commit -q --allow-empty -m step
+check none "trivial: a second 25-line edit after a commit is allowed" "$(edit "$W/src/c.ts" s2b "$step")"
+git -C "$W" -c user.email=t@t -c user.name=t commit -q --allow-empty -m step
+check deny "trivial: a commit does not reset the line count" "$(edit "$W/src/c.ts" s2b "$step")"
+out=$(bash "$HOOK" decide "$W" s2b direct "trivial: a fresh small edit")
+[[ $out == *"for 10 more changed lines of the 60"* ]] && pass "decide trivial again says how many lines are left" || fail "decide output: $out"
+check deny "trivial: recording trivial again does not reset the line count" "$(edit "$W/src/c.ts" s2b "$step")"
+runs "decide trivial for an edit with context" 0 bash "$HOOK" decide "$W" s2c direct "trivial: one line among many"
+ctx=$(jq -cn --arg p "$W/src/c.ts" --arg o "$(lines 70)" --arg n "$(lines 70 | sed 's/^line 35$/changed/')" '{tool_input:{file_path:$p,old_string:$o,new_string:$n}}')
+check none "trivial: unchanged context around an edit does not count" "$(edit "$W/src/c.ts" s2c "$ctx")"
+out=$(TRIVIAL_MAX_LINES=08 bash "$HOOK" decide "$W" s2d direct "trivial: a small typo fix")
+[[ $out == *"of the 60"* ]] && pass "a limit with a leading zero falls back to the default" || fail "decide output: $out"
 
-# delegate needs a named editing worker and keeps the driver to an integration budget
+# delegate needs a worker spawned after the decision and keeps the driver to an integration budget
+printf '2000-01-01T00:00:00Z\ts3\tspawn\tearly\tsonnet\tgeneral-purpose\n' >>"$DELEGATION_EVENTS"
 runs "decide delegate with the units" 0 bash "$HOOK" decide "$W" s3 delegate "importer, report, cli wiring"
-check deny "delegated: the driver may not edit before a worker is spawned" "$(edit "$W/src/a.ts" s3)"
+check deny "delegated: a worker spawned before the decision does not count" "$(edit "$W/src/a.ts" s3)"
 says "the no-worker deny says to spawn first" "$(edit "$W/src/a.ts" s3)" "has not spawned a named worker"
 check none "an Explore spawn is logged after the Agent call" "$(tool PostToolUse Agent s3 '{"prompt":"x","subagent_type":"Explore","model":"sonnet"}')"
 check deny "delegated: a read-only Explore spawn does not count as a worker" "$(edit "$W/src/a.ts" s3)"
+check none "a bookkeeping agent spawn is logged" "$(tool PostToolUse Agent s3 '{"name":"pm","model":"sonnet","prompt":"x","subagent_type":"project-manager"}')"
+check deny "delegated: a named agent outside the worker types does not count" "$(edit "$W/src/a.ts" s3)"
 check none "a worker spawn is logged after the Agent call" "$(tool PostToolUse Agent s3 '{"name":"importer","model":"sonnet","prompt":"x"}')"
 check none "delegated: after a worker spawn the driver may integrate" "$(edit "$W/src/a.ts" s3)"
 huge=$(jq -cn --arg p "$W/src/a.ts" --arg n "$(lines 70)" '{tool_input:{file_path:$p,old_string:"x",new_string:$n}}')
@@ -154,14 +198,23 @@ check none "delegated: a non-numeric budget file is read as zero, never evaluate
 out=$(DELEGATION_EVENTS="$T/missing/events.tsv" bash "$HOOK" <<<"$(edit "$W/src/a.ts" s3)")
 [[ -z $out ]] && pass "delegated: an events log that cannot exist fails open" || fail "missing events dir still denied: $out"
 check none "a message is logged after the SendMessage call" "$(tool PostToolUse SendMessage s3 '{"to":"importer","message":"1. fix the test"}')"
-events=$(cut -f2-4,6 "$DELEGATION_EVENTS")
-[[ $events == $'s3\tspawn\t\tExplore\ns3\tspawn\timporter\t\ns3\tmessage\timporter\t' ]] && pass "events log session, kind, target and agent type" || fail "events: $events"
+check none "a message to a teammate the session did not spawn is logged" "$(tool PostToolUse SendMessage s3 '{"to":"team-lead","message":"status"}')"
+events=$(awk -F'\t' '$2 == "s3" && $3 != "deny"' "$DELEGATION_EVENTS" | cut -f2-4,6)
+[[ $events == $'s3\tspawn\tearly\tgeneral-purpose\ns3\tspawn\t\tExplore\ns3\tspawn\tpm\tproject-manager\ns3\tspawn\timporter\t\ns3\tmessage\timporter\t\ns3\tmessage\tteam-lead\t' ]] &&
+  pass "events log session, kind, target and agent type" || fail "events: $events"
+denied=$(awk -F'\t' '$2 == "s3" && $3 == "deny" && $4 == "Edit" && $6 == "no-worker"' "$DELEGATION_EVENTS" | grep -c .)
+[[ $denied -ge 3 ]] && pass "each denial is logged with its tool and kind" || fail "deny events for s3: $denied"
+check deny "a session that never decides is denied" "$(edit "$W/src/a.ts" s0u)"
 report=$(bash "$HOOK" report)
-[[ $report =~ s3[[:space:]]+delegate[[:space:]]+2[[:space:]]+1 && $report =~ s1[[:space:]]+security[[:space:]] ]] &&
-  pass "report shows each session's decisions, spawns and messages" || fail "report: $report"
+[[ $report =~ s3[[:space:]]+delegate[[:space:]]+2[[:space:]]+1[[:space:]]+[1-9] && $report =~ s1[[:space:]]+security[[:space:]] ]] &&
+  pass "report counts workers, messages to them and denials per session" || fail "report: $report"
+[[ $report =~ s0u[[:space:]]+undecided[[:space:]]+0[[:space:]]+0[[:space:]]+1 ]] && pass "report lists a session that was denied but never decided" || fail "report: $report"
+runs "decide delegate for the worker agent" 0 bash "$HOOK" decide "$W" s3w delegate "parser unit for the worker agent"
+check none "the plugin's worker agent spawn is logged" "$(tool PostToolUse Agent s3w '{"name":"parser","model":"sonnet","prompt":"x","subagent_type":"hierarchical-implementation:worker"}')"
+check none "delegated: the plugin's worker agent counts as a worker" "$(edit "$W/src/a.ts" s3w)"
 : >"$T/empty.tsv"
 report=$(DELEGATION_LOG="$T/empty.tsv" bash "$HOOK" report)
-[[ $report != *s3* ]] && pass "report with an empty decision log does not read events as decisions" || fail "report: $report"
+[[ $report != *delegate* && $report != *security* ]] && pass "report with an empty decision log does not read events as decisions" || fail "report: $report"
 
 # a free-model worker started through the skill's script counts like an Agent worker
 free() { tool PostToolUse Bash "${2:-sfree}" "$(jq -cn --arg c "$1" '{command:$c}')"; }
@@ -172,7 +225,7 @@ check none "a free-model worker run is logged after the Bash call" "$(free "/x/s
 check none "delegated: after a free-model worker the driver may integrate" "$(edit "$W/src/a.ts" sfree)"
 check none "continuing a free-model session is logged" "$(free "free-models.sh run --model opencode/x-free $W parser /tmp/fix.md ses_abc123")"
 check none "a quoted script path and a quoted session are logged" "$(free "\"\$D/free-models.sh\" run $W lexer /tmp/fix.md \"\$SID\"")"
-events=$(grep sfree "$DELEGATION_EVENTS" | cut -f3-6)
+events=$(awk -F'\t' '$2 == "sfree" && $3 != "deny"' "$DELEGATION_EVENTS" | cut -f3-6)
 [[ $events == $'spawn\tparser\tfree\tfree-models\nmessage\tparser\topencode/x-free\tfree-models\nmessage\tlexer\tfree\tfree-models' ]] &&
   pass "free-model events log kind, worker name, model and the free-models type" || fail "events: $events"
 # a mention of the script, or a chained command, is not a worker
@@ -257,7 +310,7 @@ check none "trivial: a small heredoc write is allowed" "$(shell s6 "cat > src/c.
 one
 EOF")"
 check deny "trivial: a heredoc write past the line cap is denied" "$(shell s6 "cat > src/c.ts <<'EOF'
-$(lines 30)
+$(lines 70)
 EOF")"
 
 # Agent: named workers carry a model, in sessions the gate has seen
@@ -278,22 +331,25 @@ run "$(edit "$W/src/r.ts" s9)" >/dev/null
 git -C "$W" config --unset core.fsmonitor
 [[ ! -e $T/pwned-fsmonitor ]] && pass "the hook's git calls never run core.fsmonitor" || fail "core.fsmonitor ran"
 runs "decide trivial for a parallel race" 0 bash "$HOOK" decide "$W" s10 direct "trivial: one small parallel fix"
-run "$(edit "$W/src/p1.ts" s10)" >"$T/race1" &
-run "$(edit "$W/src/p2.ts" s10)" >"$T/race2" &
+for i in 1 2 3 4; do run "$(edit "$W/src/p$i.ts" s10)" >"$T/race$i" & done
 wait
-denied=$(cat "$T/race1" "$T/race2" | grep -c '"deny"')
-[[ $denied == 1 ]] && pass "trivial: two parallel edits to different files let only one through" || fail "parallel trivial edits: $denied denied"
+denied=$(cat "$T/race1" "$T/race2" "$T/race3" "$T/race4" | grep -c '"deny"')
+[[ $denied == 1 ]] && pass "trivial: four parallel edits to different files let only three through" || fail "parallel trivial edits: $denied denied"
 
 # LANE_MODE, exported by a lane spawner, outranks the brief
 runs "decide refuses the lane exemption in a driver lane" 1 env LANE_MODE=driver bash "$HOOK" decide "$W" s11 direct "lane: the coordinator spawned this session"
+runs "decide refuses the lane exemption without LANE_MODE" 1 bash "$HOOK" decide "$W" s11 direct "lane: the coordinator spawned this session"
 runs "decide accepts the lane exemption in a unit lane" 0 env LANE_MODE=unit bash "$HOOK" decide "$W" s11 direct "lane: the coordinator spawned this session"
-check none "lane: a unit lane edits after recording lane" "$(edit "$W/src/a.ts" s11)"
+got=$(verdict "$(LANE_MODE=unit bash "$HOOK" <<<"$(edit "$W/src/a.ts" s11)")")
+[[ $got == none ]] && pass "lane: a unit lane edits after recording lane" || fail "lane under LANE_MODE=unit: $got"
 got=$(verdict "$(LANE_MODE=driver bash "$HOOK" <<<"$(edit "$W/src/a.ts" s11)")")
 [[ $got == deny ]] && pass "lane: a recorded lane exemption is denied in a driver lane" || fail "lane under LANE_MODE=driver: $got"
+check deny "lane: a recorded lane exemption is denied without LANE_MODE" "$(edit "$W/src/a.ts" s11)"
 reason=$(LANE_MODE=driver bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12)" | jq -r '.hookSpecificOutput.permissionDecisionReason')
 [[ $reason == *"spawned as a driver lane"* ]] && pass "lane: an undecided driver lane is told to delegate" || fail "driver lane first-edit reason: $reason"
-reason=$(LANE_MODE=unit bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12)" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-[[ $reason == *"spawned as a unit lane"* ]] && pass "lane: an undecided unit lane is told to record lane" || fail "unit lane first-edit reason: $reason"
+reason=$(LANE_MODE=unit bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12u)" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+[[ $reason == *"spawned as a unit lane"* ]] && pass "lane: an undecided unit lane is told to record lane itself" || fail "unit lane first-edit reason: $reason"
+grep -q $'\ts12u\t' "$DELEGATION_LOG" && fail "unit lane decision: $(grep s12u "$DELEGATION_LOG")" || pass "lane: LANE_MODE=unit records no decision by itself"
 
 git -C "$W" worktree add -q "$W/.worktrees/fix" -b fix
 mkdir -p "$W/.worktrees/fix/src"
