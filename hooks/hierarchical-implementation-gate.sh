@@ -24,7 +24,9 @@
 # Before a tool runs (hooks/hooks.json lists which), the hook gates file edits and the shell writes
 # shell_targets recognizes, approves this script's own decide command so recording costs no
 # permission prompt, holds worker spawns to a decision, and requires a model on named workers in
-# sessions it has seen. After an agent spawn or a message, or a Bash call that runs the skill's
+# sessions it has seen. With HI_FREE_WORKERS=1 it holds the plugin's worker on sonnet until a
+# free-model run for its unit was logged, and at SessionStart it tells the session that free-model
+# workers are on. After an agent spawn or a message, or a Bash call that runs the skill's
 # free-model worker (free-models.sh run), it logs the event to DELEGATION_EVENTS, which delegate and
 # report read; each denial is logged there too, with the tool and a kind.
 #
@@ -340,6 +342,27 @@ undecided_spawn() { # undecided_spawn -> prints a deny when the session, working
   deny undecided "Record the decision before the first worker, as before the first edit, so every delegated task leaves one in the log: run $0 decide $top $session delegate \"<the units, plain words>\", naming the worktree the workers will edit if it is not $top, then retry this call. If the task is in fact one of the exemptions (${EXEMPTIONS//|/, }), $(direct_how "$top").$LANE_HINT An agent that only reads, reviews or researches needs no decision: spawn it as Explore."
 }
 
+free_first() { # free_first -> prints a deny when free-model workers are on and the plugin's worker starts on sonnet before a free-model run for its unit
+  # With HI_FREE_WORKERS=1 the skill tries each editing unit on a free model and falls back to an
+  # Agent worker when the run exits 3. Drivers skipped that prose, so the spawn waits for a logged
+  # run whose name is the worker's name, or its prefix before a dash (a redo or a best-of-N attempt
+  # of that unit). A worker on another model passes, since the user may have named it, and driver
+  # lanes never use free models.
+  local name model here script
+  [[ ${HI_FREE_WORKERS:-} == 1 && ${LANE_MODE:-} != driver && $session =~ $SID ]] || return 0
+  command -v "${OPENCODE_BIN:-opencode}" >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null && [[ -w $(dirname "$DELEGATION_EVENTS") ]] || return 0 # a run could not be logged here, so it could never clear the deny
+  here=$(cd "$cwd" 2>/dev/null && pwd -P) && [[ $here == "$root"/* ]] || return 0
+  IFS=$US read -r name model < <(jq -r '[.tool_input.name // "", .tool_input.model // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null)
+  case $model in '' | *[Ss][Oo][Nn][Nn][Ee][Tt]*) ;; *) return 0 ;; esac
+  [[ -n $name ]] && S=$session N=$name awk -F'\t' '
+    $2 == ENVIRON["S"] && $3 == "spawn" && $6 == "free-models" && (ENVIRON["N"] == $4 || index(ENVIRON["N"], $4 "-") == 1) { f = 1; exit }
+    END { exit !f }' "$DELEGATION_EVENTS" 2>/dev/null && return 0
+  script=${0%/hooks/*}/skills/hierarchical-implementation/scripts/free-models.sh
+  [[ -f $script ]] || script="the skill's scripts/free-models.sh"
+  deny free-first "Free-model workers are on (HI_FREE_WORKERS=1), so each editing unit tries a free model before an Agent worker. Read references/free-models.md in the hierarchical-implementation skill, write the brief to a file outside the worktree, and run $script run <worktree> ${name:-<unit name>} <brief-file> with run_in_background. If it exits 3, retry this spawn with name set to the same unit name, or that name plus a dash and a suffix for a redo. If the user named this worker's model, pass that model instead."
+}
+
 own_decide() { # own_decide <command>: true when the command is exactly this script's decide call, with inert arguments, for the calling session
   local args=${1#"$0 decide "}
   [[ $0 =~ $PLAIN && $1 == "$0 decide "* && $1 != *$'\n'* && $args =~ $DECIDE_ARGS ]] || return 1
@@ -615,6 +638,14 @@ IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // "", .hook_
 [[ -z $agent ]] || exit 0
 cwd=${cwd:-$PWD}
 
+if [[ $event == SessionStart ]]; then
+  # A session cannot see HI_FREE_WORKERS without running a command, so the skill's free-model rule
+  # never fired; this note states it at every start, including after compaction.
+  [[ ${HI_FREE_WORKERS:-} == 1 && ${LANE_MODE:-} != driver ]] && command -v "${OPENCODE_BIN:-opencode}" >/dev/null 2>&1 || exit 0
+  jq -cn '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:"Free-model workers are on (HI_FREE_WORKERS=1, opencode installed). When the hierarchical-implementation skill delegates an editing unit, read its references/free-models.md and run free-models.sh for the unit before an Agent worker. The delegation gate refuses the plugin worker on sonnet until a free-model run under the unit name was tried."}}'
+  exit 0
+fi
+
 if [[ $event == PostToolUse ]]; then
   fields=""
   case $tool in
@@ -623,9 +654,10 @@ if [[ $event == PostToolUse ]]; then
     Bash) # a free-model worker counts like an Agent worker; continuing its session is a message
       cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
       [[ $cmd =~ $FREE_RUN ]] || exit 0
-      kind=spawn
+      kind=spawn unit=${BASH_REMATCH[5]}
       [[ -n ${BASH_REMATCH[7]} ]] && kind=message
-      fields="${BASH_REMATCH[5]}"$'\t'"${BASH_REMATCH[4]:-free}"$'\t'free-models
+      case $unit in \"*\" | \'*\') unit=${unit:1:${#unit}-2} ;; esac # the shell drops quotes around the unit name, and free_first compares it with the worker's name
+      fields="$unit"$'\t'"${BASH_REMATCH[4]:-free}"$'\t'free-models
       ;;
     *) exit 0 ;;
   esac
@@ -691,10 +723,11 @@ case $tool in
     type=$(jq -r '.tool_input.subagent_type // "" | tostring | ascii_downcase | gsub("[\\s_-]"; "")' <<<"$input" 2>/dev/null)
     if [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
       kind=${out%%"$US"*} reason=${out#*"$US"}
-    else
-      [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] || exit 0
-      jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1 || exit 0
+    elif [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] &&
+      jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1; then
       kind=model reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
+    elif [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first) && [[ -n $out ]]; then
+      kind=${out%%"$US"*} reason=${out#*"$US"}
     fi
     ;;
 esac

@@ -90,10 +90,11 @@ intended model version; if it does not, ask the user which worker model to use.
   keep or add the deciding test, reviewed, commit exactly those changes, and confirm the test
   fails at that commit. Then brief 2 or 3
   Agent workers at once with the same rewritten brief, each in its own worktree and branch from
-  that commit, on the worker model; they count against the 2–3 at once, and free-model runs
-  stay out. Reject an attempt that changes the test's file or the setup and config the test
-  runs under, checking `git diff <that commit>` and `git status --short` in its worktree. Run
-  the test in each worktree yourself, review the passing attempts smallest diff first, and
+  that commit, on the worker model, named after the unit (`<unit>-a`, `<unit>-b`); they count
+  against the 2–3 at once, and free-model runs stay out. Reject an attempt that changes the
+  test's file or the setup and config the test runs under, checking `git diff <that commit>`
+  and `git status --short` in its worktree. Run the test in each worktree yourself, review the
+  passing attempts smallest diff first, and
   integrate the first that passes review; if none does, ask the user. Once the unit is
   integrated or the user has decided, remove the attempt worktrees and branches by the repo's
   rules, and ask the user when a removal is refused. Without such a test, do not: reviewing N
@@ -108,8 +109,12 @@ intended model version; if it does not, ask the user which worker model to use.
 
 ## Free-model workers and explicit model requests
 
-Read `references/free-models.md` in this skill's directory first when `HI_FREE_WORKERS=1` is set,
-or when the user names a worker model that is not an Agent tool alias. When the user names a
+When `HI_FREE_WORKERS=1` is set and `opencode` is installed, each editing unit tries a free model
+before an Agent worker, except in a `LANE_MODE=driver` session. A session-start note says when it
+is on; `printenv HI_FREE_WORKERS` checks it. Then read `references/free-models.md` in this skill's
+directory before the first brief: the gate refuses the plugin's worker on sonnet until a
+free-model run under the unit's name was tried. Read it too when the user names a worker model
+that is not an Agent tool alias. When the user names a
 model ("use fable for this unit", "run the parser on gpt-6-sol"): an Agent tool alias runs as an
 Agent worker with that model; a model only `opencode models` lists runs through that reference's
 `--model` path, with no rotation and no fallback; for neither, tell the user it is unavailable
