@@ -6,32 +6,36 @@
 # change goes whole to one worker. Subagents are never gated (their hook input carries agent_id).
 #
 # Each decision is judged before the task's size shows, so each one is held to what it claims:
-#   delegate   the driver edits only after it spawned a named worker that can edit (Explore and Plan
-#              do not count) or started a free-models.sh run, and only up to an integration budget
-#              of changed lines per worktree;
-#              past that it is authoring, not integrating
-#   trivial    one file, up to a cap of changed lines
-#   security   only the files named when it was recorded
-#   lane, opt-out, no-subagents   the whole worktree; lane never when LANE_MODE=driver
-# Changed lines are counted two ways on purpose. Trivial reads git's diff of its one file, which only
-# the driver touches. Delegate sums the driver's own edit payloads, because workers edit the same
-# worktree and git cannot tell their lines apart; an edit that later fails still counts.
+#   delegate   the driver edits only after it spawned a worker (a named agent of WORKER_TYPES, or a
+#              free-models.sh run) since its first delegate decision in the worktree, and only up to
+#              an integration budget of changed lines per worktree; past that it is authoring
+#   trivial    up to TRIVIAL_MAX_FILES files and a cap of changed lines in all
+#   security   only the files named when it was recorded, each an agent-control or secrets path,
+#              checked again at each edit because decide runs in an environment the model sets
+#   lane       the whole worktree, only in a session started with LANE_MODE=unit
+#   opt-out, no-subagents   the whole worktree
+# Both line caps sum the lines the driver's own edits change, so neither a commit nor recording
+# again resets them; an edit that later fails still counts. Trivial also reads git's diff of its files and takes
+# the larger count, which catches shell writes whose size the hook cannot see. Delegate cannot use
+# the diff, because workers edit the same worktree and git cannot tell their lines apart.
 #
 # Before a tool runs (hooks/hooks.json lists which), the hook gates file edits and the shell writes
 # shell_targets recognizes, approves this script's own decide command so recording costs no
 # permission prompt, and requires a model on named workers in sessions it has seen. After an agent
 # spawn or a message, or a Bash call that runs the skill's free-model worker (free-models.sh run),
-# it logs the event to DELEGATION_EVENTS, which delegate and report read.
+# it logs the event to DELEGATION_EVENTS, which delegate and report read; each denial is logged
+# there too, with the tool and a kind.
 #
 # It is a speed bump that makes skipping delegation a deliberate, logged act, not a barrier: a model
 # set on getting around it can write files in ways it does not see.
 #
 # Only paths under HIERARCHICAL_GATE_ROOT (~/vscode, where implementation repos live) are gated.
 # State lives under <state dir>/delegation/<session>/<digest of the worktree's git dir>, in files
-# with the suffixes .decision (choice and reason), .trivial (the one file a trivial decision
-# covers), .security (the files security decisions named) and .driver (the driver's changed lines
-# under delegate). Recording again resets .trivial, adds to .security and keeps .driver, so a new
-# delegate decision does not refill the budget. Each decision is appended to DELEGATION_LOG. The
+# with the suffixes .decision (choice and reason), .trivial.<n> (one file each that a trivial
+# decision covers), .trivial-lines (its changed lines), .security (the files security decisions
+# named), .since (when delegate was first recorded) and .driver (the driver's changed lines under
+# delegate). Recording again frees the .trivial.<n> files for a new task, adds to .security and
+# keeps the rest, so it refills no line count. Each decision is appended to DELEGATION_LOG. The
 # deny reason hands the model a command that contains the worktree path, so paths outside a plain
 # character set are never gated. Fails open on any resolution error, including state it cannot
 # write. HIERARCHICAL_GATE=off disables it. Written for bash 3.2, the macOS default.
@@ -45,10 +49,29 @@ GIT_BIN="${GIT_BIN:-git}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-gates"
 DELEGATION_LOG="${DELEGATION_LOG:-$STATE_DIR/delegation-decisions.tsv}"
 DELEGATION_EVENTS="${DELEGATION_EVENTS:-$STATE_DIR/delegation-events.tsv}"
-# A trivial change is one a driver would not brief a worker for; integration leaves room for review
-# fixups and merge resolution, not for a unit's worth of new code.
-TRIVIAL_MAX_LINES="${TRIVIAL_MAX_LINES:-20}"
+# A trivial change is one a driver would not brief a worker for: a worker starts with tens of
+# thousands of tokens of context and rereads what the driver already read, which a change of a few
+# files and lines never repays. Integration leaves room for review fixups and merge resolution, not
+# for a unit's worth of new code.
+TRIVIAL_MAX_LINES="${TRIVIAL_MAX_LINES:-60}"
+TRIVIAL_MAX_FILES="${TRIVIAL_MAX_FILES:-3}"
 INTEGRATE_MAX_LINES="${INTEGRATE_MAX_LINES:-60}"
+# The limits reach bash arithmetic, which would run a command substitution inside a variable's value
+# and read a leading zero as octal. The file count is kept small: each file costs forks per edit.
+[[ $TRIVIAL_MAX_LINES =~ ^(0|[1-9][0-9]{0,4})$ ]] || TRIVIAL_MAX_LINES=60
+[[ $TRIVIAL_MAX_FILES =~ ^[1-9][0-9]?$ ]] || TRIVIAL_MAX_FILES=3
+[[ $INTEGRATE_MAX_LINES =~ ^(0|[1-9][0-9]{0,4})$ ]] || INTEGRATE_MAX_LINES=60
+# Paths, relative to the worktree, a security decision may name: the agent's instructions, settings
+# and hooks (also as chezmoi sources, with chezmoi's exact_, private_ and readonly_ prefixes), skill
+# definitions, and files that hold secrets: data and config files whose name or directory says so,
+# not the code that handles them. CI, ownership and IAM files are not among them. A plugin's hooks,
+# skills, agents and commands are controls too; security_path checks those in code.
+SECURITY_PATHS="${SECURITY_PATHS:-(^|/)(CLAUDE|AGENTS|GEMINI)(\.local)?\.md(\.tmpl)?$|(^|/)SKILL\.md$|(^|/)((exact|private|readonly)_)*(dot_|\.)(claude|claude-plugin|codex|opencode|cursor|gemini|agents)(/|$)|(^|/)((exact|private|readonly)_)*(dot_config|\.config)/((exact|private|readonly)_)*(claude|codex|opencode)(/|$)|(^|/)\.chezmoitemplates/[^/]*(claude|codex|opencode)|(^|/)(opencode\.jsonc?|\.mcp\.json)$|(^|/)\.env(\.[^/]*)?$|(^|/)([^/]*[._-])?(secrets?|credentials?|keychain)([_-][^/.]*)?(\.(ya?ml|json|toml|ini|conf|cfg|properties|txt|enc|age|gpg))?$|(^|/)(secrets?|credentials?)/([^/]+/)*[^/]+\.(ya?ml|json|toml|ini|conf|cfg|properties|txt|enc|age|gpg)$|\.(pem|key|p12)$}"
+# Agent types that count as an editing worker under delegate; a named agent with no type is the
+# default general-purpose agent. worker is the plugin's agent copied into ~/.claude/agents, and
+# free-models is the type this hook logs for a free-models.sh run, so an override keeps it.
+# Specialists that only read, plan or keep records do not count.
+WORKER_TYPES="${WORKER_TYPES:-general-purpose|worker|hierarchical-implementation:worker|fork|free-models}"
 MAX_TARGETS=20 # distinct files one shell command may write; more is denied, which bounds the hook's run time
 EXEMPTIONS='trivial|security|lane|opt-out|no-subagents'
 PLAIN_SET='[A-Za-z0-9._/@+-]'
@@ -134,14 +157,73 @@ diff_lines() { # diff_lines <top> <file> -> lines added plus deleted against HEA
   fi
 }
 
-worker_spawned() { # true when this session spawned a named agent that can edit
-  awk -F'\t' -v s="$session" '$2 == s && $3 == "spawn" && $4 != "" && $6 != "Explore" && $6 != "Plan" {found = 1; exit} END {exit !found}' "$DELEGATION_EVENTS" 2>/dev/null
+worker_spawned() { # worker_spawned <base> -> true when this session spawned a worker since it first recorded delegate for that worktree
+  local since
+  since=$(cat "$1.since" 2>/dev/null) # empty for a delegate an older version recorded: then any spawn counts
+  awk -F'\t' -v s="$session" -v t="$since" -v w="^($WORKER_TYPES)$" '$2 == s && $3 == "spawn" && $4 != "" && $1 >= t && ($6 == "" || $6 ~ w) {found = 1; exit} END {exit !found}' "$DELEGATION_EVENTS" 2>/dev/null
+}
+
+total() { # total <file> -> the sum of the numbers it holds, one per line; anything else reads as 0
+  local n
+  n=$(awk '{n += $1} END {print n + 0}' "$1" 2>/dev/null)
+  [[ $n =~ $NUM ]] || n=0
+  echo "$n"
+}
+
+claim() { # claim <base> <path>: true when the path is one of the files the trivial decision covers, taking a free one of its TRIVIAL_MAX_FILES slots if needed
+  # A slot appears with its content in one step (a hard link to a written file), so parallel calls
+  # never claim more files than there are slots, nor one file twice.
+  local i tmp=$1.claim.$$
+  for ((i = 1; i <= TRIVIAL_MAX_FILES; i++)); do
+    [[ $(cat "$1.trivial.$i" 2>/dev/null) == "$2" ]] && return 0
+  done
+  printf '%s\n' "$2" >"$tmp" 2>/dev/null || return 1
+  for ((i = 1; i <= TRIVIAL_MAX_FILES; i++)); do
+    if ln "$tmp" "$1.trivial.$i" 2>/dev/null || [[ $(cat "$1.trivial.$i" 2>/dev/null) == "$2" ]]; then
+      rm -f "$tmp"
+      return 0
+    fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
+security_path() { # security_path <top> <path> -> true for an agent-control or secrets path inside top
+  local rel=${2#"$1"/} dir parent
+  [[ $rel =~ $SECURITY_PATHS ]] && return 0
+  # A plugin's hooks, skills, agents and commands are controls too. A tracked manifest marks the
+  # plugin, since a bare .claude-plugin directory costs one mkdir the hook does not see.
+  dir=$rel
+  while [[ $dir == */* ]]; do
+    dir=${dir%/*}
+    case /$dir in */hooks | */skills | */agents | */commands) ;; *) continue ;; esac
+    parent=${dir%/*}
+    [[ $parent == "$dir" ]] && parent="" || parent=$parent/
+    git_ -C "$1" ls-files --error-unmatch -- "${parent}.claude-plugin/plugin.json" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+deny() { # deny <kind> <reason>: what gate and scope print to deny an edit; the kind goes to the events log
+  printf '%s%s%s' "$1" "$US" "$2"
+}
+
+record() { # record <base> <top> <choice> <reason> [named file...]: writes a decision's state and appends it to DELEGATION_LOG
+  local base=$1 top=$2 choice=$3 reason=$4
+  shift 4
+  mkdir -p "${base%/*}" "$(dirname "$DELEGATION_LOG")" &&
+    printf '%s\t%s\n' "$choice" "$reason" >"$base.decision.new" &&
+    mv -f "$base.decision.new" "$base.decision" &&
+    rm -f "$base.trivial" "$base".trivial.[0-9]* && # .trivial is the one slot older versions wrote
+    { (($# == 0)) || printf '%s\n' "$@" >>"$base.security"; } &&
+    { [[ $choice != delegate || -f $base.since ]] || date -u +%FT%TZ >"$base.since"; } &&
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$top" "$choice" "$reason" "$*" >>"$DELEGATION_LOG"
 }
 
 # The policy these texts state also lives in SKILL.md, README.md, examples/CLAUDE.md and the user's
 # CLAUDE.md, and the test suite pins parts of it; change them together.
 delegate_how() { # delegate_how <top>
-  printf '%s' "run $0 decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill (hierarchical-implementation:hierarchical-implementation when installed as a plugin), and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a named worker with model set, including the file in this edit. Review each result critically, send numbered corrections to the same worker with SendMessage or re-brief a fresh worker, stop after three rounds, and edit here only to integrate. While a /repro gate is open here, the worker works in this worktree."
+  printf '%s' "run $0 decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill (hierarchical-implementation:hierarchical-implementation when installed as a plugin), and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a named worker (subagent_type hierarchical-implementation:worker, or general-purpose) with model set, including the file in this edit. Review each result critically, send numbered corrections to the same worker with SendMessage or re-brief a fresh worker, stop after three rounds, and edit here only to integrate. While a /repro gate is open here, the worker works in this worktree."
 }
 direct_how() { # direct_how <top>
   printf '%s' "run $0 decide $1 $session direct \"<exemption>: <why, plain words>\" and retry; a security exemption also lists every file it covers after the reason, as paths relative to $1. Write reasons in plain words, without backticks, quotes, dollar signs, exclamation marks or backslashes"
@@ -149,16 +231,19 @@ direct_how() { # direct_how <top>
 instead_how() { # instead_how <top> -> the ways out of a trivial exemption the task outgrew
   printf '%s' "Delegate: $(delegate_how "$1") Or record a different exemption: $(direct_how "$1")"
 }
-EXEMPTION_TEXT="trivial (one file, a few lines; it covers one file and at most $TRIVIAL_MAX_LINES changed lines), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or it handles secret values; it is never delegated and covers only the files you name; repo ownership, CI and IAM files are not in this class), lane (a coordinator session spawned this one to execute a unit it will review, and its brief does not set Lane mode: driver), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
+EXEMPTION_TEXT="trivial (a small change: it covers up to $TRIVIAL_MAX_FILES files and $TRIVIAL_MAX_LINES changed lines in all, which neither a commit nor recording again resets), security (the change edits the agent's own controls: hooks, gates, agent settings or permissions, CLAUDE.md, AGENTS.md, skill or agent definitions, or data and config files that hold secrets, not code that handles them; it is never delegated and covers only the files you name, and decide refuses other paths; repo ownership, CI and IAM files are not in this class), lane (only in a session a lane spawner started with LANE_MODE=unit to execute a unit its coordinator reviews), opt-out (the user or the repo's rules say not to delegate), no-subagents (this harness has no subagent tool)"
 # A spawner that starts lanes (herdr-spawn --lane) exports LANE_MODE, which outranks the brief's
-# Lane mode line: a brief can be misread or lost to compaction, the environment cannot.
+# Lane mode line: a brief can be misread or lost to compaction, the environment cannot. So the lane
+# exemption needs LANE_MODE=unit, and a lane started without it follows this gate like any driver.
+# The session still records lane itself: the variable outlives the lane in its pane's shell, so a
+# later session there must not be exempted without a decision of its own.
 case ${LANE_MODE:-} in
   driver) LANE_HINT=" This session was spawned as a driver lane (LANE_MODE=driver), so the lane exemption does not apply: delegate." ;;
-  unit) LANE_HINT=" This session was spawned as a unit lane (LANE_MODE=unit): record direct with the lane exemption." ;;
+  unit) LANE_HINT=" This session was spawned as a unit lane (LANE_MODE=unit): if it executes a unit a coordinator reviews, record direct with the lane exemption." ;;
   *) LANE_HINT="" ;;
 esac
 
-gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothing to allow
+gate() { # gate <file> <changed lines it adds> -> prints a deny (kind and reason), or nothing to allow
   local base top gitdir n
   [[ -n $1 ]] || return 0
   n=$2
@@ -166,7 +251,7 @@ gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothi
   resolve "$1" "$cwd" || return 0
   [[ $path == "$root"/* ]] || return 0
   if [[ $path == *$'\n'* ]]; then
-    echo "The delegation gate cannot track a path with a newline in it, so it refuses edits to such paths under $root."
+    deny newline "The delegation gate cannot track a path with a newline in it, so it refuses edits to such paths under $root."
     return 0
   fi
   repo_of "$real" || return 0
@@ -177,53 +262,59 @@ gate() { # gate <file> <changed lines it adds> -> prints a deny reason, or nothi
     return 0
   fi
   if [[ ! -f $base.decision ]]; then
-    echo "Implementation runs through worker subagents by default, with the user's standing authorization for editing workers, so decide before the main thread edits $top. Delegate: $(delegate_how "$top") Work directly only when the whole task is one of these exemptions: $EXEMPTION_TEXT. Then $(direct_how "$top").$LANE_HINT Do not edit through the shell to get around this."
+    deny undecided "Implementation runs through worker subagents by default, with the user's standing authorization for editing workers, so decide before the main thread edits $top. Delegate: $(delegate_how "$top") Work directly only when the whole task is one of these exemptions: $EXEMPTION_TEXT. Then $(direct_how "$top").$LANE_HINT Do not edit through the shell to get around this."
     return 0
   fi
   scope "$base" "$top" "$n"
 }
 
-scope() { # scope <base> <top> <changed lines> -> prints a deny reason when the recorded decision does not cover this edit
-  # Side effects: a trivial decision claims the first file it sees, and an allowed driver edit under
-  # delegate is appended to the budget. Both writes are safe under parallel tool calls without a
-  # lock: the claim is first-writer-wins, and a parallel batch can overshoot the budget only once.
-  local base=$1 top=$2 n=$3 choice why used events_dir
+scope() { # scope <base> <top> <changed lines> -> prints a deny when the recorded decision does not cover this edit
+  # Side effects: a trivial decision claims the files it sees, and an allowed driver edit under
+  # delegate or trivial is added to its line count. These writes are safe under parallel tool calls
+  # without a lock: claims take exclusive slots, and a parallel batch can overshoot a count only once.
+  local base=$1 top=$2 n=$3 choice why used dirty f i events_dir
   IFS=$'\t' read -r choice why <"$base.decision"
   case $choice:$why in
     delegate:*)
       events_dir=$(dirname "$DELEGATION_EVENTS")
       [[ -d $events_dir && -w $events_dir ]] || return 0
-      if ! worker_spawned; then
-        echo "This session recorded delegate for $top but has not spawned a named worker that can edit (Explore and Plan agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, or start the skill's free-models.sh run for a free-model worker, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
+      if ! worker_spawned "$base"; then
+        deny no-worker "This session recorded delegate for $top but has not spawned a named worker since then (an Agent call with subagent_type hierarchical-implementation:worker or general-purpose, or a free-models.sh run; read-only and bookkeeping agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, or start the skill's free-models.sh run for a free-model worker, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
         return 0
       fi
-      used=$(awk '{n += $1} END {print n + 0}' "$base.driver" 2>/dev/null)
-      [[ $used =~ $NUM ]] || used=0
+      used=$(total "$base.driver")
       if ((used + n > INTEGRATE_MAX_LINES)); then
-        echo "Under delegate the driver's own edits in $top would reach $((used + n)) changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file with SendMessage, or spawn a worker for it. If the user asked you to finish it yourself, run $0 decide $top $session direct \"opt-out: <what the user said>\"."
+        deny budget "Under delegate the driver's own edits in $top would reach $((used + n)) changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file with SendMessage, or spawn a worker for it. If the user asked you to finish it yourself, run $0 decide $top $session direct \"opt-out: <what the user said>\"."
       else
         echo "$n" >>"$base.driver"
       fi
       ;;
     direct:trivial:*)
-      (set -C && printf '%s\n' "$path" >"$base.trivial") 2>/dev/null
-      if ! grep -qxF -- "$path" "$base.trivial"; then
-        echo "The trivial exemption recorded for $top covers one file and this edit is another, so the task is not trivial. $(instead_how "$top"). Do not edit through the shell to get around this."
+      if ! claim "$base" "$path"; then
+        deny trivial-files "The trivial exemption recorded for $top covers up to $TRIVIAL_MAX_FILES files and this edit is another, so the task is not trivial. $(instead_how "$top"). Do not edit through the shell to get around this."
         return 0
       fi
-      n=$(($(diff_lines "$top" "$path") + n))
-      ((n <= TRIVIAL_MAX_LINES)) ||
-        echo "The trivial exemption covers a few lines, and this edit brings $path to about $n changed lines, past the cap of $TRIVIAL_MAX_LINES, so the task is not trivial. $(instead_how "$top")."
+      used=$(total "$base.trivial-lines")
+      dirty=0
+      for ((i = 1; i <= TRIVIAL_MAX_FILES; i++)); do
+        f=$(cat "$base.trivial.$i" 2>/dev/null) && [[ -n $f ]] && dirty=$((dirty + $(diff_lines "$top" "$f")))
+      done
+      ((dirty > used)) && used=$dirty
+      if ((used + n > TRIVIAL_MAX_LINES)); then
+        deny trivial-lines "The trivial exemption covers $TRIVIAL_MAX_LINES changed lines in all, and this edit brings this session's direct edits in $top to about $((used + n)), so the task is not trivial. $(instead_how "$top")."
+      else
+        echo "$n" >>"$base.trivial-lines"
+      fi
       ;;
     direct:security:*)
-      grep -qxF -- "$path" "$base.security" 2>/dev/null ||
-        echo "The security exemption recorded for $top covers only the files named when it was recorded, and $path is not one of them. If this file also edits the agent's own controls or handles secret values, add it: run $0 decide $top $session direct \"security: <why, plain words>\" <file>. Otherwise give it to a named worker with the Agent tool and model set; subagent edits are not gated, while recording delegate here would drop the security scope."
+      grep -qxF -- "$path" "$base.security" 2>/dev/null && security_path "$top" "$path" ||
+        deny security "The security exemption recorded for $top covers only the agent-control or secrets files named when it was recorded, and $path is not one of them. If this file also edits the agent's own controls or holds secrets, add it: run $0 decide $top $session direct \"security: <why, plain words>\" <file>. Otherwise give it to a named worker with the Agent tool and model set; subagent edits are not gated, while recording delegate here would drop the security scope."
       ;;
     direct:lane:*)
-      [[ ${LANE_MODE:-} != driver ]] ||
-        echo "The lane exemption recorded for $top does not apply: this session was spawned as a driver lane (LANE_MODE=driver). Delegate: $(delegate_how "$top")"
+      [[ ${LANE_MODE:-} == unit ]] ||
+        deny lane "The lane exemption recorded for $top applies only in a session a lane spawner started with LANE_MODE=unit, and this one has LANE_MODE=${LANE_MODE:-unset}. Delegate: $(delegate_how "$top")"
       ;;
-    direct:*) ;; # lane, opt-out, no-subagents and reasons from older versions cover the whole worktree
+    direct:*) ;; # opt-out, no-subagents and reasons from older versions cover the whole worktree
   esac
 }
 
@@ -441,8 +532,8 @@ if [[ ${1:-} == decide ]]; then
     echo "   or: $0 decide <worktree> <session> direct \"security: <why, three or more words>\" <file>..." >&2
     exit 1
   }
-  if [[ ${LANE_MODE:-} == driver && $choice == direct && $reason == lane:* ]]; then
-    echo "this session was spawned as a driver lane (LANE_MODE=driver): record delegate, not the lane exemption" >&2
+  if [[ $choice == direct && $reason == lane:* && ${LANE_MODE:-} != unit ]]; then
+    echo "the lane exemption needs LANE_MODE=unit, which a lane spawner such as herdr-spawn --lane unit exports, and this session has LANE_MODE=${LANE_MODE:-unset}: record delegate, or another exemption that applies" >&2
     exit 1
   fi
   repo_of "$repo" || { echo "not a git worktree: $repo" >&2; exit 1; }
@@ -451,19 +542,20 @@ if [[ ${1:-} == decide ]]; then
   named=()
   for f in "${files[@]}"; do
     resolve "$f" "$top" && [[ $path == "$top"/* && $path =~ $PLAIN ]] || { echo "not a plain path inside $top: $f" >&2; exit 1; }
+    security_path "$top" "$path" || {
+      echo "not an agent-control or secrets path: $f. security covers hooks, gates, agent settings and permissions, CLAUDE.md, AGENTS.md, skill and agent definitions and data or config files that hold secrets; give other files to a worker, or record trivial for a small change" >&2
+      exit 1
+    }
     named[${#named[@]}]=$path
   done
-  {
-    mkdir -p "${base%/*}" "$(dirname "$DELEGATION_LOG")" &&
-      printf '%s\t%s\n' "$choice" "$reason" >"$base.decision.new" &&
-      mv -f "$base.decision.new" "$base.decision" &&
-      rm -f "$base.trivial" &&
-      { ((${#named[@]} == 0)) || printf '%s\n' "${named[@]}" >>"$base.security"; } &&
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$top" "$choice" "$reason" "${named[*]}" >>"$DELEGATION_LOG"
-  } || { echo "could not record the decision under $STATE_DIR" >&2; exit 1; }
+  record "$base" "$top" "$choice" "$reason" "${named[@]}" || { echo "could not record the decision under $STATE_DIR" >&2; exit 1; }
   case $choice:$reason in
     delegate:*) echo "recorded delegate: spawn the named workers; after that, this session's own edits in $top are limited to integration, $INTEGRATE_MAX_LINES changed lines in all" ;;
-    direct:trivial:*) echo "recorded direct (trivial): one file in $top, up to $TRIVIAL_MAX_LINES changed lines, is no longer gated" ;;
+    direct:trivial:*)
+      used=$(total "$base.trivial-lines")
+      ((used < TRIVIAL_MAX_LINES)) || used=$TRIVIAL_MAX_LINES
+      echo "recorded direct (trivial): up to $TRIVIAL_MAX_FILES files in $top are no longer gated, for $((TRIVIAL_MAX_LINES - used)) more changed lines of the $TRIVIAL_MAX_LINES this session gets here"
+      ;;
     direct:security:*) echo "recorded direct (security): ${#named[@]} named file(s) in $top are no longer gated" ;;
     *) echo "recorded $choice: this session's edits in $top are no longer gated" ;;
   esac
@@ -474,7 +566,9 @@ if [[ ${1:-} == report ]]; then
   [[ -f $DELEGATION_LOG ]] || { echo "no decisions recorded in $DELEGATION_LOG" >&2; exit 1; }
   events=$DELEGATION_EVENTS
   [[ -f $events ]] || events=/dev/null
-  awk -F'\t' -v ex="$EXEMPTIONS" '
+  # Only workers and the messages sent to them count: sessions also spawn specialists and message
+  # teammates, which say nothing about the review loop.
+  awk -F'\t' -v ex="$EXEMPTIONS" -v w="^($WORKER_TYPES)$" '
     FILENAME == ARGV[1] {
       k = $4
       if (k == "direct") k = match($5, "^(" ex "):") ? substr($5, 1, RLENGTH - 1) : "direct"
@@ -482,11 +576,12 @@ if [[ ${1:-} == report ]]; then
       else if (index("+" kinds[$2] "+", "+" k "+") == 0) kinds[$2] = kinds[$2] "+" k
       next
     }
-    $3 == "spawn" { spawns[$2]++ }
-    $3 == "message" { messages[$2]++ }
+    $3 == "spawn" && $4 != "" && ($6 == "" || $6 ~ w) { workers[$2]++; named[$2, $4] = 1 }
+    $3 == "message" && (($2, $4) in named) { messages[$2]++ }
+    $3 == "deny" { denies[$2]++; if (!($2 in kinds)) { order[++n] = $2; kinds[$2] = "undecided" } }
     END {
-      printf "%-36s  %-24s  %6s  %8s\n", "session", "decisions", "spawns", "messages"
-      for (i = 1; i <= n; i++) { s = order[i]; printf "%-36s  %-24s  %6d  %8d\n", s, kinds[s], spawns[s], messages[s] }
+      printf "%-36s  %-24s  %7s  %8s  %6s\n", "session", "decisions", "workers", "messages", "denies"
+      for (i = 1; i <= n; i++) { s = order[i]; printf "%-36s  %-24s  %7d  %8d  %6d\n", s, kinds[s], workers[s], messages[s], denies[s] }
     }' "$DELEGATION_LOG" "$events"
   exit 0
 fi
@@ -520,11 +615,22 @@ if [[ $event == PostToolUse ]]; then
 fi
 
 root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || exit 0
-reason=""
+reason="" kind=""
 case $tool in
   Edit | Write | MultiEdit | NotebookEdit)
     file=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' <<<"$input" 2>/dev/null) || exit 0
-    changed=$(jq -r '[.tool_input | .old_string, .new_string, .content, .new_source, (.edits[]? | .old_string, .new_string)] | map(select(type == "string") | split("\n") | length) | add // 0' <<<"$input" 2>/dev/null) || changed=0
+    # An edit's size is the lines it changes: old and new lose the lines they share at both ends,
+    # so context around a one-line fix does not count. Whole-file contents count whole.
+    changed=$(jq -r '
+      def delta($o; $n): ($o | split("\n")) as $a | ($n | split("\n")) as $b | ([$a, $b] | map(length) | min) as $m |
+        (first(range($m) | select($a[.] != $b[.])) // $m) as $p |
+        (first(range($m - $p) | select($a[-1 - .] != $b[-1 - .])) // ($m - $p)) as $s |
+        ($a | length) + ($b | length) - 2 * ($p + $s);
+      def str: if type == "string" then . else "" end;
+      [.tool_input | ((.content, .new_source) | select(type == "string") | split("\n") | length),
+        (select(.old_string != null or .new_string != null) | delta(.old_string | str; .new_string | str)),
+        (.edits[]? | delta(.old_string | str; .new_string | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
+    [[ $changed =~ $NUM ]] || changed=0
     # replace_all changes every occurrence, so its size is one replacement times the occurrences
     old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
     if [[ -n $old ]] && resolve "$file" "$cwd"; then
@@ -533,7 +639,8 @@ case $tool in
       hits=$(((${#content} - ${#rest}) / ${#old}))
       ((hits > 1)) && changed=$((changed * hits))
     fi
-    reason=$(gate "$file" "$changed")
+    out=$(gate "$file" "$changed")
+    [[ -z $out ]] || { kind=${out%%"$US"*} reason=${out#*"$US"}; }
     ;;
   Bash | Monitor)
     cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
@@ -547,17 +654,22 @@ case $tool in
       [[ -n $target ]] || continue
       count=$((count + 1))
       if ((count > MAX_TARGETS)); then
-        reason="This command writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller commands."
+        kind=too-many-files reason="This command writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller commands."
         break
       fi
-      reason=$(gate "$target" "$size")
-      [[ -z $reason ]] || { reason="This command writes $target, which the gate treats like an edit. $reason"; break; }
+      out=$(gate "$target" "$size")
+      [[ -z $out ]] || { kind=${out%%"$US"*} reason="This command writes $target, which the gate treats like an edit. ${out#*"$US"}"; break; }
     done < <(shell_targets "$cmd")
     ;;
   Agent | Task)
     [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] || exit 0
     jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1 || exit 0
-    reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
+    kind=model reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
     ;;
 esac
-[[ -z $reason ]] || jq -cn --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
+[[ -n $reason ]] || exit 0
+if [[ $session =~ $SID ]]; then
+  mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null
+  printf '%s\t%s\tdeny\t%s\t\t%s\n' "$(date -u +%FT%TZ)" "$session" "$tool" "$kind" >>"$DELEGATION_EVENTS" 2>/dev/null
+fi
+jq -cn --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
