@@ -11,7 +11,7 @@ fail() { printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
 T=$(cd "$(mktemp -d)" && pwd -P)
 export XDG_STATE_HOME="$T/state" HIERARCHICAL_GATE_ROOT="$T/vscode" DELEGATION_LOG="$T/decisions.tsv" DELEGATION_EVENTS="$T/events.tsv"
-unset LANE_MODE
+unset LANE_MODE HI_FREE_WORKERS OPENCODE_BIN
 trap 'chmod -R u+w "$T"; rm -rf "$T"' EXIT
 W="$T/vscode/repo"
 git init -q -b main "$W"
@@ -377,6 +377,54 @@ reason=$(LANE_MODE=driver bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12)" | jq -r '.
 reason=$(LANE_MODE=unit bash "$HOOK" <<<"$(edit "$W/src/a.ts" s12u)" | jq -r '.hookSpecificOutput.permissionDecisionReason')
 [[ $reason == *"spawned as a unit lane"* ]] && pass "lane: an undecided unit lane is told to record lane itself" || fail "unit lane first-edit reason: $reason"
 grep -q $'\ts12u\t' "$DELEGATION_LOG" && fail "unit lane decision: $(grep s12u "$DELEGATION_LOG")" || pass "lane: LANE_MODE=unit records no decision by itself"
+
+# HI_FREE_WORKERS=1: the plugin's worker on sonnet waits for a free-model run of its unit
+mkdir -p "$T/bin"
+printf '#!/bin/sh\n' >"$T/bin/opencode"
+chmod +x "$T/bin/opencode"
+fcheck() { # fcheck <none|deny> <label> <payload> [VAR=value...]: check with free-model workers on and a stub opencode
+  local want=$1 label=$2 payload=$3 got
+  shift 3
+  got=$(verdict "$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" "$@" bash "$HOOK" <<<"$payload")")
+  [[ $got == "$want" ]] && pass "$label" || fail "$label (expected $want, got $got)"
+}
+fw() { jq -cn --arg n "$1" --arg m "${2:-sonnet}" --arg t "${3:-hierarchical-implementation:worker}" '{name:$n,model:$m,prompt:"x",subagent_type:$t}'; }
+runs "decide delegate for free-first" 0 bash "$HOOK" decide "$W" sf1 delegate "parser and lexer units"
+runs "decide delegate in a second free-first session" 0 bash "$HOOK" decide "$W" sf2 delegate "parser unit only"
+fcheck deny "free-first: the plugin's worker on sonnet before a free-model run is denied" "$(tool PreToolUse Agent sf1 "$(fw parser)")"
+reason=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" bash "$HOOK" <<<"$(tool PreToolUse Agent sf1 "$(fw parser)")" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+[[ $reason == *"references/free-models.md"* && $reason == *"free-models.sh run <worktree> parser <brief-file>"* && $reason == *"exits 3"* ]] &&
+  pass "free-first: the deny names the reference, the run command with the unit and the fallback" || fail "free-first reason: $reason"
+fcheck deny "free-first: a full sonnet model id counts as sonnet" "$(tool PreToolUse Agent sf1 "$(fw parser claude-sonnet-5-5)")"
+fcheck deny "free-first: an unnamed plugin worker is denied" "$(tool PreToolUse Agent sf1 '{"model":"sonnet","prompt":"x","subagent_type":"worker"}')"
+fcheck none "free-first: off without HI_FREE_WORKERS=1" "$(tool PreToolUse Agent sf1 "$(fw parser)")" HI_FREE_WORKERS=
+fcheck none "free-first: off when opencode is missing" "$(tool PreToolUse Agent sf1 "$(fw parser)")" OPENCODE_BIN="$T/bin/none"
+fcheck none "free-first: a driver lane is not asked" "$(tool PreToolUse Agent sf1 "$(fw parser)")" LANE_MODE=driver
+fcheck none "free-first: a model the user named runs as asked" "$(tool PreToolUse Agent sf1 "$(fw parser fable)")"
+fcheck none "free-first: a general-purpose agent is not asked" "$(tool PreToolUse Agent sf1 "$(fw parser sonnet general-purpose)")"
+fcheck none "free-first: a session working outside the root is not asked" "$(tool PreToolUse Agent sf1 "$(fw parser)" "$T/other")"
+got=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" bash "$HOOK" <<<"$(tool PreToolUse Agent sf1 '{"name":"parser","prompt":"x","subagent_type":"worker"}')" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+[[ $got == "Set model"* ]] && pass "free-first: a named worker without a model gets the model deny first" || fail "free-first without model: $got"
+check none "free-first: the parser free-model run is logged" "$(free "/x/scripts/free-models.sh run $W parser /tmp/brief.md 2>&1" sf1)"
+fcheck none "free-first: after its free-model run the unit's worker starts" "$(tool PreToolUse Agent sf1 "$(fw parser)")"
+fcheck none "free-first: a redo named after the unit starts" "$(tool PreToolUse Agent sf1 "$(fw parser-b)")"
+fcheck deny "free-first: another unit still needs its own run" "$(tool PreToolUse Agent sf1 "$(fw lexer)")"
+fcheck deny "free-first: a name sharing a prefix without a dash does not match" "$(tool PreToolUse Agent sf1 "$(fw parserx)")"
+fcheck deny "free-first: another session's run does not count" "$(tool PreToolUse Agent sf2 "$(fw parser)")"
+check none "free-first: a run with a quoted unit name is logged" "$(free "free-models.sh run $W \"lexer\" /tmp/brief.md" sf1)"
+fcheck none "free-first: a quoted unit name matches the worker's name" "$(tool PreToolUse Agent sf1 "$(fw lexer)")"
+fcheck deny "free-first: an events log in a directory not created yet still asks" "$(tool PreToolUse Agent sf1 "$(fw parser)")" DELEGATION_EVENTS="$T/new-events/events.tsv"
+grep -q $'\tsf1\tdeny\tAgent\t\tfree-first$' "$DELEGATION_EVENTS" && pass "free-first: a denial is logged with its kind" || fail "free-first deny events: $(grep sf1 "$DELEGATION_EVENTS")"
+start() { jq -cn '{hook_event_name:"SessionStart",session_id:"ss1",cwd:"/",source:"startup"}'; }
+out=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" bash "$HOOK" <<<"$(start)")
+[[ $(jq -r '.hookSpecificOutput | .hookEventName + " " + .additionalContext' <<<"$out" 2>/dev/null) == "SessionStart Free-model workers are on"* ]] &&
+  pass "session start: the note is added when free-model workers are on" || fail "session start output: $out"
+out=$(env OPENCODE_BIN="$T/bin/opencode" bash "$HOOK" <<<"$(start)")
+[[ -z $out ]] && pass "session start: nothing without HI_FREE_WORKERS=1" || fail "session start without the variable: $out"
+out=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/none" bash "$HOOK" <<<"$(start)")
+[[ -z $out ]] && pass "session start: nothing when opencode is missing" || fail "session start without opencode: $out"
+out=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" LANE_MODE=driver bash "$HOOK" <<<"$(start)")
+[[ -z $out ]] && pass "session start: nothing in a driver lane" || fail "session start in a driver lane: $out"
 
 git -C "$W" worktree add -q "$W/.worktrees/fix" -b fix
 mkdir -p "$W/.worktrees/fix/src"

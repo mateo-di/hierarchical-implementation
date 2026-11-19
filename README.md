@@ -53,6 +53,7 @@ There are three layers.
   - `opt-out`, `no-subagents`: the whole worktree.
 - **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
 - **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root.
+- **Free model first.** With `HI_FREE_WORKERS=1` and opencode installed, the plugin's worker on sonnet is denied until the session logged a `free-models.sh run` under its name, or under its name's prefix before a dash (a redo or a best-of-N attempt). Driver lanes and workers on another model are not asked. At session start the hook adds a note that free-model workers are on, since a session cannot see the variable otherwise.
 - **Logging.** Worker spawns, `SendMessage` calls, `free-models.sh run` commands and denials are logged.
 
 ```bash
@@ -130,6 +131,7 @@ The gate is a speed bump, not a barrier. It makes skipping delegation a delibera
   Writes other than heredocs have no known size, so they don't count against the budget. The trivial cap also reads git's diff of its files, so it sees them until they are committed. A command that writes more than 20 files is denied.
 - **Lines that never landed.** The hook counts an edit before it runs, so an edit that fails, that the user rejects, or a command denied at a later target still counts against the caps.
 - **Workers the hook does not count.** A driver that never edits itself records no decision, so `report` does not list it, when it delegates through general-purpose workers instead of the plugin's agent, works from a directory outside `HIERARCHICAL_GATE_ROOT`, or runs `free-models.sh` in a form the hook does not recognize.
+- **Free-first by model and name.** A worker on a model other than sonnet passes the free-first check, since the user may have named that model, and a name with the prefix of an earlier free run passes too. Any logged `free-models.sh run` call counts, even one that failed or never ran a model.
 - **Inherited lane mode.** `LANE_MODE=unit` stays in the lane pane's shell after the lane ends, so a later session there may still record `lane`. Each recording is logged.
 - **Repeated decisions.** Recording `trivial` again frees its files for a new task, and the log shows every repeat. Line counts carry over.
 - **Classification.** Claude still picks the exemption itself. The hook only bounds what each one allows, and `opt-out` is taken on trust.
