@@ -25,6 +25,13 @@
 # up front: OpenCode Zen refuses free models with a usage-limit error for an id it did not issue.
 # opencode retries a rate limit without printing anything, so a run silent for HI_FREE_STALL
 # seconds counts as failed.
+#
+# A model id agy/<model> runs through the Antigravity CLI instead, as a headless `agy -p` on that
+# model. It spends the user's agy quota, not a free tier, so the rotation tries one only when
+# HI_FREE_MODELS_PREFER names it. agy runs with the user's own agy settings and no restricted agent:
+# in Auto mode, its default for headless runs, it approves the commands it judges safe, so the
+# brief's limits are instructions there, not rules. The session it prints is its conversation id
+# marked agy:, and a correction with that session runs only on agy models.
 
 set -u
 REGISTRY="${HI_FREE_REGISTRY:-${XDG_STATE_HOME:-$HOME/.local/state}/hierarchical-implementation/free-models.json}"
@@ -35,15 +42,16 @@ MAX_TRIES="${HI_FREE_MAX_TRIES:-3}"  # models tried per run
 TIMEOUT="${HI_FREE_TIMEOUT:-1800}"   # seconds one attempt may take
 STALL="${HI_FREE_STALL:-300}"        # seconds one attempt may print nothing
 OPENCODE="${OPENCODE_BIN:-opencode}"
+AGY="${AGY_BIN:-agy}"
 REFRESH_EVERY=86400
 MESSAGE="Execute the unit in the attached brief."
 RETRY_NOTE="An earlier attempt on another model stopped partway. Check git status and git diff for the files the brief names, and continue from what is there. "
-CHILD="" OUT="" # the running attempt's client pid and its event output
-trap '[[ -n $CHILD ]] && halt; exit 143' TERM INT HUP
+CHILD="" OUT="" ATT="" # the running attempt's client pid, its event output, and agy's copy of the brief
+trap '[[ -n $CHILD ]] && halt; rm -f "$ATT"; exit 143' TERM INT HUP
 
 usage() {
   cat >&2 <<'EOF'
-usage: free-models.sh run [--model <provider/model>] <worktree> <name> <brief-file> [session-id]
+usage: free-models.sh run [--model <provider/model> | --model agy/<model>] <worktree> <name> <brief-file> [session-id]
        free-models.sh list
        free-models.sh refresh
 EOF
@@ -101,15 +109,23 @@ refresh() { # free models opencode can reach; all or nothing, so a failed lookup
     [[ -n $tools ]] || { echo "free-models: cannot read OpenRouter's model list" >&2; return 1; }
     ids=$(grep -v '^openrouter/' <<<"$ids"; grep -Fx -f <(printf '%s\n' "$tools") <<<"$ids")
   fi
+  # agy models are not opencode's to list, so their entries and cooldowns stay
   update '.models as $m
     | .refreshed = (now | floor)
-    | .models = ($ids | split("\n") | map(select(. != "")) | map({key: ., value: ($m[.] // {})}) | from_entries)' --arg ids "$ids"
+    | .models = ($ids | split("\n") | map(select(. != "")) | map({key: ., value: ($m[.] // {})}) | from_entries)
+      + ($m | with_entries(select(.key | startswith("agy/"))))' --arg ids "$ids"
 }
 
+backend() { [[ $1 == agy[/:]* ]] && echo agy || echo opencode; } # backend <model or session>: agy/<id> models and agy:<id> sessions run on agy
+
 candidates() { # candidates <registry json>: preferred models first, then the rest, skipping any still cooling down
-  jq -r --arg prefer "$PREFER" '
+  local agy=""
+  command -v "$AGY" >/dev/null 2>&1 && agy=1
+  # an agy model runs only while it is preferred and agy is installed, whatever the registry holds
+  jq -r --arg prefer "$PREFER" --arg agy "$agy" '
     .models as $m
-    | ($prefer | split(" ") | map(select($m[.] != null))) + ($m | keys_unsorted)
+    | ($prefer | split(" ") | map(select(if startswith("agy/") then $agy != "" else $m[.] != null end)))
+      + ($m | keys_unsorted | map(select(startswith("agy/") | not)))
     | reduce .[] as $id ([]; if any(.[]; . == $id) then . else . + [$id] end)
     | .[] | select(($m[.].cooldown_until // 0) <= now)' <<<"$1"
 }
@@ -124,7 +140,9 @@ mark() { # mark <model> ok|fail [error]
 
 session_id() { jq -rR 'fromjson? | .sessionID // empty' <"$OUT" | head -n 1; }
 
-halt() { # interrupts the running attempt's session on the opencode service, then stops its client (KILL after 10s)
+# interrupts the running attempt's session on the opencode service, then stops its client (KILL after
+# 10s). agy has no service: stopping its client stopped the command it was running, when tried.
+halt() {
   local i sid
   sid=$(session_id)
   [[ -n $sid ]] && bounded 15 "$OPENCODE" api session.interrupt --param sessionID="$sid" >/dev/null 2>&1
@@ -137,11 +155,24 @@ halt() { # interrupts the running attempt's session on the opencode service, the
 }
 
 attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: prints the result, or sets err and returns 1 (the model failed) or 2 (a local problem)
-  local log rc size=0 now started=$SECONDS last=$SECONDS sid text
-  local -a cmd=("$OPENCODE" run --auto --agent "$AGENT" --format json -m "$1" --title "$3" -f "$4")
-  [[ -n ${6:-} ]] && cmd+=(--session "$6")
+  local log rc size=0 now started=$SECONDS last=$SECONDS sid text tool
+  local -a cmd
+  tool=$(backend "$1") ATT=""
+  if [[ $tool == agy ]]; then
+    command -v "$AGY" >/dev/null 2>&1 || { err="agy is not installed"; return 2; }
+    # @<path> in the prompt attaches a file but ends at whitespace, so agy gets a copy at a plain path
+    ATT=$(mktemp /tmp/free-models-brief.XXXXXX) && cp "$4" "$ATT" || { rm -f "$ATT"; err="cannot copy the brief for agy"; return 2; }
+    # the prompt runs as written, with no slash command or skill expansion
+    cmd=("$AGY" --model "${1#agy/}" --disable-slash-commands --output-format stream-json)
+    [[ -n ${6:-} ]] && cmd+=(--conversation "${6#agy:}")
+    cmd+=(-p "$5$MESSAGE @$ATT")
+  else
+    cmd=("$OPENCODE" run --auto --agent "$AGENT" --format json -m "$1" --title "$3" -f "$4")
+    [[ -n ${6:-} ]] && cmd+=(--session "$6")
+    cmd+=("$5$MESSAGE")
+  fi
   OUT=$(mktemp) log=$(mktemp)
-  (cd "$2" && exec "${cmd[@]}" "$5$MESSAGE") >"$OUT" 2>"$log" </dev/null &
+  (cd "$2" && exec "${cmd[@]}") >"$OUT" 2>"$log" </dev/null &
   CHILD=$!
   err=""
   while kill -0 "$CHILD" 2>/dev/null; do
@@ -161,14 +192,22 @@ attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: p
   wait "$CHILD"
   rc=$?
   CHILD=""
-  sid=$(session_id)
-  [[ -n $err ]] || err=$(jq -rR 'fromjson? | select(.type == "error") | .error.message // .error.type // "error"' <"$OUT" | head -n 1)
-  text=$(jq -rRs '[split("\n")[] | fromjson? | select(.type == "text")]
-    | if length == 0 then "" else last.part.messageID as $m | map(select(.part.messageID == $m) | .part.text) | join("\n") end' <"$OUT")
+  if [[ $tool == agy ]]; then # an init event with the conversation id, step updates, then one result
+    sid=$(jq -rR 'fromjson? | .conversation_id // empty' <"$OUT" | head -n 1)
+    [[ -n $sid ]] && sid="agy:$sid" # marks the session as agy's, so a correction stays on agy
+    [[ -n $err ]] || err=$(jq -rR 'fromjson? | .result // empty
+      | select(.status != "SUCCESS" or .finished_reason) | .error // .finished_reason // .status // "no status"' <"$OUT" | head -n 1)
+    text=$(jq -rR 'fromjson? | .result.response // empty' <"$OUT")
+  else
+    sid=$(session_id)
+    [[ -n $err ]] || err=$(jq -rR 'fromjson? | select(.type == "error") | .error.message // .error.type // "error"' <"$OUT" | head -n 1)
+    text=$(jq -rRs '[split("\n")[] | fromjson? | select(.type == "text")]
+      | if length == 0 then "" else last.part.messageID as $m | map(select(.part.messageID == $m) | .part.text) | join("\n") end' <"$OUT")
+  fi
   if [[ -z $err && $rc -ne 0 ]]; then err=$(tail -n 1 "$log"); fi
-  if [[ -z $err && $rc -ne 0 ]]; then err="opencode exited $rc"; fi
+  if [[ -z $err && $rc -ne 0 ]]; then err="$tool exited $rc"; fi
   if [[ -z $err && -z $text ]]; then err="no reply"; fi
-  rm -f "$OUT" "$log"
+  rm -f "$OUT" "$log" "$ATT"
   if [[ $err == *"Agent not found"* ]]; then
     err="opencode has no agent named $AGENT; install the restricted agent from the plugin's examples"
     return 2
@@ -184,17 +223,21 @@ run() {
   local model tries=0 note="" reg refreshed v relisted=""
   if [[ ${1:-} == --model ]]; then
     EXPLICIT=${2:-}
-    [[ -n $EXPLICIT ]] || usage
+    [[ -n $EXPLICIT && $EXPLICIT != agy/ ]] || usage
     shift 2
   fi
   for v in COOLDOWN MAX_TRIES TIMEOUT STALL; do
     [[ ${!v} =~ ^[0-9]+$ ]] || fallback "HI_FREE_$v must be a whole number, not '${!v}'"
   done
   [[ $# -ge 3 && $# -le 4 && -d $1 && -f $3 ]] || usage
-  command -v "$OPENCODE" >/dev/null 2>&1 || fallback "opencode is not installed"
+  [[ $(backend "$EXPLICIT") == agy ]] || command -v "$OPENCODE" >/dev/null 2>&1 || fallback "opencode is not installed"
   local wt=$1 name=$2 brief session=${4:-}
   brief="$(cd "$(dirname "$3")" && pwd -P)/$(basename "$3")" # the worker runs in the worktree
   if [[ -n $EXPLICIT ]]; then
+    if [[ -n $session && $(backend "$EXPLICIT") != $(backend "$session") ]]; then
+      echo "free-models: session $session belongs to $(backend "$session"), not $(backend "$EXPLICIT"); $EXPLICIT did not run" >&2
+      exit 1
+    fi
     attempt "$EXPLICIT" "$wt" "$name" "$brief" "" "$session"
     case $? in
       0) return 0 ;;
@@ -209,8 +252,10 @@ run() {
   fi
   set -f # model ids are split on whitespace, never globbed
   for model in $(candidates "$reg"); do
+    # a session continues only on the backend that started it
+    [[ -n $session && $(backend "$model") != $(backend "$session") ]] && continue
     # skip, unstarted, a stale model that this run's refresh already dropped
-    [[ -n $relisted && $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
+    [[ -n $relisted && $(backend "$model") == opencode && $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
     tries=$((tries + 1))
     ((tries > MAX_TRIES)) && break
     attempt "$model" "$wt" "$name" "$brief" "$note" "$session"
@@ -228,6 +273,7 @@ run() {
     mark "$model" fail "$err"
     note=$RETRY_NOTE
   done
+  ((tries > 0)) || [[ -z $session ]] || fallback "no $(backend "$session") model is preferred and ready to continue session $session"
   fallback "no free model finished the unit"
 }
 

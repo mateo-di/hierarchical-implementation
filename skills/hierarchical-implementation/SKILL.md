@@ -119,8 +119,9 @@ directory before the first brief: the gate refuses the plugin's worker on sonnet
 free-model run under the unit's name was tried. Read it too when the user names a worker model
 that is not an Agent tool alias. When the user names a
 model ("use fable for this unit", "run the parser on gpt-6-sol"): an Agent tool alias runs as an
-Agent worker with that model; a model only `opencode models` lists runs through that reference's
-`--model` path, with no rotation and no fallback; for neither, tell the user it is unavailable
+Agent worker with that model; a model only `opencode models` lists, or one `agy models` lists as
+`agy/<id>`, runs through that reference's `--model` path, with no rotation and no fallback; for
+neither, tell the user it is unavailable
 and ask. Never substitute another model.
 
 ## The gate

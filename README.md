@@ -121,10 +121,12 @@ cp examples/opencode-lane-worker.md ~/.config/opencode/agents/lane-worker.md
 
 Without it the script runs no model and the driver falls back. The agent narrows what the model can call. It is not a sandbox: a test runner executes the repo's code.
 
+With the Antigravity CLI installed, a model id `agy/<id>`, with `<id>` from `agy models`, runs through a headless `agy -p` instead, on your agy quota rather than a free tier. The rotation tries one only when `HI_FREE_MODELS_PREFER` names it, and `--model agy/<id>` runs one directly. agy runs with your own agy permission settings, not a restricted agent: in Auto mode, its default for headless runs, it approves the commands it judges safe, so the brief's limits are instructions there.
+
 | Variable | Default | Effect |
 |---|---|---|
 | `HI_FREE_WORKERS` | unset | `1` turns free-model workers on |
-| `HI_FREE_MODELS_PREFER` | empty | Space-separated model ids to try first |
+| `HI_FREE_MODELS_PREFER` | empty | Space-separated model ids to try first; the only way an `agy/<id>` model joins the rotation |
 | `HI_FREE_AGENT` | `lane-worker` | opencode agent the worker runs as |
 | `HI_FREE_COOLDOWN` | `3600` | Seconds a failed model is skipped |
 | `HI_FREE_MAX_TRIES` | `3` | Models tried per unit before falling back |
