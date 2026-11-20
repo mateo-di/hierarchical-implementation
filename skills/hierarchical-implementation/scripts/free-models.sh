@@ -46,8 +46,8 @@ AGY="${AGY_BIN:-agy}"
 REFRESH_EVERY=86400
 MESSAGE="Execute the unit in the attached brief."
 RETRY_NOTE="An earlier attempt on another model stopped partway. Check git status and git diff for the files the brief names, and continue from what is there. "
-CHILD="" OUT="" # the running attempt's client pid and its event output
-trap '[[ -n $CHILD ]] && halt; exit 143' TERM INT HUP
+CHILD="" OUT="" ATT="" # the running attempt's client pid, its event output, and agy's copy of the brief
+trap '[[ -n $CHILD ]] && halt; rm -f "$ATT"; exit 143' TERM INT HUP
 
 usage() {
   cat >&2 <<'EOF'
@@ -155,17 +155,17 @@ halt() {
 }
 
 attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: prints the result, or sets err and returns 1 (the model failed) or 2 (a local problem)
-  local log rc size=0 now started=$SECONDS last=$SECONDS sid text att="" tool
+  local log rc size=0 now started=$SECONDS last=$SECONDS sid text tool
   local -a cmd
-  tool=$(backend "$1")
+  tool=$(backend "$1") ATT=""
   if [[ $tool == agy ]]; then
     command -v "$AGY" >/dev/null 2>&1 || { err="agy is not installed"; return 2; }
     # @<path> in the prompt attaches a file but ends at whitespace, so agy gets a copy at a plain path
-    att=$(mktemp /tmp/free-models-brief.XXXXXX) && cp "$4" "$att" || { rm -f "$att"; err="cannot copy the brief for agy"; return 2; }
+    ATT=$(mktemp /tmp/free-models-brief.XXXXXX) && cp "$4" "$ATT" || { rm -f "$ATT"; err="cannot copy the brief for agy"; return 2; }
     # the prompt runs as written, with no slash command or skill expansion
     cmd=("$AGY" --model "${1#agy/}" --disable-slash-commands --output-format stream-json)
     [[ -n ${6:-} ]] && cmd+=(--conversation "${6#agy:}")
-    cmd+=(-p "$5$MESSAGE @$att")
+    cmd+=(-p "$5$MESSAGE @$ATT")
   else
     cmd=("$OPENCODE" run --auto --agent "$AGENT" --format json -m "$1" --title "$3" -f "$4")
     [[ -n ${6:-} ]] && cmd+=(--session "$6")
@@ -207,7 +207,7 @@ attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: p
   if [[ -z $err && $rc -ne 0 ]]; then err=$(tail -n 1 "$log"); fi
   if [[ -z $err && $rc -ne 0 ]]; then err="$tool exited $rc"; fi
   if [[ -z $err && -z $text ]]; then err="no reply"; fi
-  rm -f "$OUT" "$log" "$att"
+  rm -f "$OUT" "$log" "$ATT"
   if [[ $err == *"Agent not found"* ]]; then
     err="opencode has no agent named $AGENT; install the restricted agent from the plugin's examples"
     return 2
@@ -234,6 +234,10 @@ run() {
   local wt=$1 name=$2 brief session=${4:-}
   brief="$(cd "$(dirname "$3")" && pwd -P)/$(basename "$3")" # the worker runs in the worktree
   if [[ -n $EXPLICIT ]]; then
+    if [[ -n $session && $(backend "$EXPLICIT") != $(backend "$session") ]]; then
+      echo "free-models: session $session belongs to $(backend "$session"), not $(backend "$EXPLICIT"); $EXPLICIT did not run" >&2
+      exit 1
+    fi
     attempt "$EXPLICIT" "$wt" "$name" "$brief" "" "$session"
     case $? in
       0) return 0 ;;
@@ -251,7 +255,7 @@ run() {
     # a session continues only on the backend that started it
     [[ -n $session && $(backend "$model") != $(backend "$session") ]] && continue
     # skip, unstarted, a stale model that this run's refresh already dropped
-    [[ -n $relisted && $model != agy/* && $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
+    [[ -n $relisted && $(backend "$model") == opencode && $(registry | jq --arg id "$model" '.models | has($id)') == false ]] && continue
     tries=$((tries + 1))
     ((tries > MAX_TRIES)) && break
     attempt "$model" "$wt" "$name" "$brief" "$note" "$session"
@@ -269,6 +273,7 @@ run() {
     mark "$model" fail "$err"
     note=$RETRY_NOTE
   done
+  ((tries > 0)) || [[ -z $session ]] || fallback "no $(backend "$session") model is preferred and ready to continue session $session"
   fallback "no free model finished the unit"
 }
 

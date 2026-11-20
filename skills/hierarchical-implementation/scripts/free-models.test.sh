@@ -79,6 +79,7 @@ brief=$(cat "${msg##*@}")
 printf '%s|%s|%s|%s|%s|%s|%s\n' "$model" "$conv" "$PWD" "${msg% @*}" "${brief//$'\n'/ }" "$args" "${msg##*@}" >>"$STUB_AGY_LOG"
 printf '{"event":"init","conversation_id":"%s","init":{"model":"%s"}}\n{"event":"step_update","step_update":{}}\n' "$conv" "$model"
 [[ " ${STUB_CRASH:-} " == *" agy/$model "* ]] && exit 7 # dies before its result
+[[ " ${STUB_SLOW:-} " == *" agy/$model "* ]] && sleep 30
 if [[ " ${STUB_BARE:-} " == *" agy/$model "* ]]; then # a result with no status
   printf '{"event":"result","result":{"conversation_id":"%s"}}\n' "$conv"
   exit 0
@@ -243,6 +244,13 @@ STUB_BARE="agy/m1" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>
 grep -q 'agy/m1 failed: no status' "$T/err" && pass "a result with no status is a failure that says so" || fail "stderr: $(cat "$T/err")"
 STUB_CRASH="agy/m1" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>"$T/err"
 grep -q 'agy/m1 failed: agy exited 7' "$T/err" && pass "an agy crash names agy" || fail "stderr: $(cat "$T/err")"
+: >"$STUB_AGY_LOG"
+STUB_SLOW="agy/m1" bash "$SCRIPT" run --model agy/m1 "$T/wt" ua7 "$T/brief.md" >/dev/null 2>&1 &
+pid=$!
+for ((i = 0; i < 50; i++)); do [[ -s $STUB_AGY_LOG ]] && break; sleep 0.1; done
+kill -TERM "$pid"
+wait "$pid"
+expect "a stopped run removes agy's copy of the brief" "$([[ -e $(cut -d'|' -f7 "$STUB_AGY_LOG") ]] && echo left || echo removed)" "removed"
 OPENCODE_BIN="$T/missing" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>&1
 expect "an explicit agy model needs no opencode" "$?" "0"
 AGY_BIN="$T/missing" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>"$T/err"
@@ -268,6 +276,15 @@ expect "an opencode session is not sent to agy" "$(grep -c . "$STUB_AGY_LOG"):$(
 : >"$STUB_LOG"
 HI_FREE_MODELS_PREFER="agy/m1 opencode/a-free" fm run "$T/wt" ua6 "$T/brief.md" agy:c1 >/dev/null 2>&1
 expect "an agy session is not sent to opencode" "$(cut -d'|' -f1,2 "$STUB_AGY_LOG"):$(grep -c . "$STUB_LOG")" "m1|c1:0"
+fm run "$T/wt" ua8 "$T/brief.md" agy:c1 >/dev/null 2>"$T/err"
+expect "an agy session with no agy model preferred falls back" "$?" "3"
+grep -q 'no agy model is preferred and ready to continue session agy:c1' "$T/err" && pass "the fallback names the session's backend" || fail "stderr: $(cat "$T/err")"
+: >"$STUB_LOG" && : >"$STUB_AGY_LOG"
+fm run --model opencode/a-free "$T/wt" ua9 "$T/brief.md" agy:c1 >/dev/null 2>"$T/err"
+expect "an explicit model with another backend's session is a wrong call" "$?:$(grep -c . "$STUB_LOG")" "1:0"
+grep -q 'session agy:c1 belongs to agy, not opencode' "$T/err" && pass "the session mismatch is named" || fail "stderr: $(cat "$T/err")"
+fm run --model agy/m1 "$T/wt" ua9 "$T/brief.md" ses_x >/dev/null 2>&1
+expect "an explicit agy model with an opencode session is a wrong call" "$?:$(grep -c . "$STUB_AGY_LOG")" "1:0"
 : >"$STUB_LOG" && : >"$STUB_AGY_LOG"
 fm run "$T/wt" ua3 "$T/brief.md" >/dev/null 2>&1
 expect "an agy model the registry holds but no one prefers is not tried" "$(grep -c . "$STUB_AGY_LOG"):$(calls)" "0:opencode/a-free "
