@@ -2,6 +2,10 @@
 
 A multi-CLI plugin and delegation gate (originally built for Claude Code, with native adapters for OpenCode, Antigravity CLI `agy`, OMP `oh-my-pi`, Codex CLI, Gemini CLI, Cursor and Pi) that makes worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result critically, sends corrections to the same worker, and integrates. One shared gate engine (`hooks/hierarchical-implementation-gate.sh`) holds the driver to that across every CLI: it must decide before its first edit or first worker, and each decision only allows what it claims.
 
+An Opus driver in Claude Code implements two tickets. The gate refuses its first workers until it records a decision; it then runs two Sonnet workers in parallel, reviews each diff, makes two small edits and reruns the tests:
+
+![An Opus driver records its decision after the gate refuses its first workers, runs two Sonnet workers in parallel and reviews their work](docs/demo.gif)
+
 ## Install
 
 ### Claude Code
