@@ -52,7 +52,7 @@ There are three layers.
   - `lane`: the whole worktree, only in a session started with `LANE_MODE=unit`, which a lane spawner such as `herdr-spawn --lane unit` exports. The session records `lane` itself: the variable outlives the lane in its pane's shell, so the gate does not exempt a later session there without a decision.
   - `opt-out`, `no-subagents`: the whole worktree.
 - **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
-- **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root.
+- **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root. With `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on, the Agent tool takes no model, so the check is skipped.
 - **Free model first.** With `HI_FREE_WORKERS=1` and opencode installed, the plugin's worker on sonnet is denied until the session logged a `free-models.sh run` under its name, or under its name's prefix before a dash (a redo or a best-of-N attempt). Driver lanes and workers on another model are not asked. At session start the hook adds a note that free-model workers are on, since a session cannot see the variable otherwise.
 - **Logging.** Worker spawns, `SendMessage` calls, `free-models.sh run` commands and denials are logged.
 
@@ -80,7 +80,7 @@ The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cac
 | `WORKER_TYPES` | `general-purpose\|worker\|hierarchical-implementation:worker\|fork\|free-models` | Agent types that count as a worker under delegate; `free-models` is the type logged for a `free-models.sh run`, so keep it in an override |
 | `XDG_STATE_HOME` | `~/.local/state` | Per-session state lives under `$XDG_STATE_HOME/claude-gates/delegation/` |
 | `DELEGATION_LOG` | `…/claude-gates/delegation-decisions.tsv` | Decisions: time, session, worktree, choice, reason, named files |
-| `DELEGATION_EVENTS` | `…/claude-gates/delegation-events.tsv` | Spawns, messages and denials: time, session, kind, target (the tool for a denial), model, agent type (for a denial, its kind: `undecided`, `no-worker`, `budget`, `trivial-files`, `trivial-lines`, `security`, `lane`, `model`, `too-many-files` or `newline`) |
+| `DELEGATION_EVENTS` | `…/claude-gates/delegation-events.tsv` | Spawns, messages and denials: time, session, kind, target (the tool for a denial), model (the one the spawn resolved to, when Claude Code reports it), agent type (for a denial, its kind: `undecided`, `no-worker`, `budget`, `trivial-files`, `trivial-lines`, `security`, `lane`, `model`, `too-many-files` or `newline`) |
 
 Set these in the environment Claude Code starts with.
 
