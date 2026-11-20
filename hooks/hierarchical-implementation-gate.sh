@@ -723,10 +723,18 @@ case $HARNESS in
   *) PROTO=generic ;;
 esac
 
-emit_pass() {
+emit_pass() { # emit_pass [event_kind: pre|post|session]
+  local kind=${1:-pre}
   case $PROTO in
     claude | codex) ;;
-    agy | gemini | cursor) printf '{}\n' ;;
+    agy)
+      if [[ $kind == pre ]]; then
+        printf '{"decision":"ask"}\n'
+      else
+        printf '{}\n'
+      fi
+      ;;
+    gemini | cursor) printf '{}\n' ;;
     generic) printf '{"decision":"passthrough"}\n' ;;
   esac
 }
@@ -769,7 +777,7 @@ handle_session_start() {
   if [[ ${HI_FREE_WORKERS:-} == 1 && ${LANE_MODE:-} != driver ]] && command -v "${OPENCODE_BIN:-opencode}" >/dev/null 2>&1; then
     emit_session_context "Free-model workers are on (HI_FREE_WORKERS=1, opencode installed). When the hierarchical-implementation skill delegates an editing unit, read its references/free-models.md and run free-models.sh for the unit before an Agent worker. The delegation gate refuses the plugin worker on sonnet until a free-model run under the unit name was tried."
   else
-    emit_pass
+    emit_pass session
   fi
   exit 0
 }
@@ -861,9 +869,15 @@ agy_is_subagent() { # agy_is_subagent <parent_or_agent> <is_sub> <transcript_pat
   return 1
 }
 
-[[ ${HIERARCHICAL_GATE:-on} == off ]] && { emit_pass; exit 0; }
-
 input=$(cat)
+if [[ ${HIERARCHICAL_GATE:-on} == off ]]; then
+  if [[ $PROTO == agy ]] && [[ $input == *'"PreToolUse"'* ]]; then
+    emit_pass pre
+  else
+    emit_pass post
+  fi
+  exit 0
+fi
 reason="" kind=""
 
 case $PROTO in
@@ -927,8 +941,11 @@ case $PROTO in
     ;;
 
   agy)
-    IFS=$US read -r agent is_sub transcript event tool session cwd < <(jq -r '[.parentConversationId // .agentId // "", (.isSubagent // false | tostring), .transcriptPath // "", .hookEventName // "PreToolUse", .toolCall.name // "", .conversationId // "", .cwd // (.workspacePaths[0]? // "")] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
-    agy_is_subagent "$agent" "$is_sub" "$transcript" && { emit_pass; exit 0; }
+    IFS=$US read -r agent is_sub transcript event tool session cwd < <(jq -r '[.parentConversationId // .agentId // "", (.isSubagent // false | tostring), .transcriptPath // "", .hookEventName // "PreToolUse", .toolCall.name // "", .conversationId // "", .cwd // (.workspacePaths[0]? // "")] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || { emit_pass pre; exit 0; }
+    agy_kind=pre
+    [[ $event == PostToolUse ]] && agy_kind=post
+    [[ $event == SessionStart ]] && agy_kind=session
+    agy_is_subagent "$agent" "$is_sub" "$transcript" && { emit_pass "$agy_kind"; exit 0; }
     cwd=${cwd:-$PWD}
 
     [[ $event == SessionStart ]] && handle_session_start
@@ -952,11 +969,11 @@ case $PROTO in
           check_post_shell "$cmd"
           ;;
       esac
-      emit_pass
+      emit_pass post
       exit 0
     fi
 
-    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || { emit_pass; exit 0; }
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || { emit_pass pre; exit 0; }
     case $tool in
       edit_file | write_file)
         file=$(jq -r '.toolCall.args.Path // .toolCall.args.path // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }

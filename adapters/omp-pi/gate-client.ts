@@ -174,8 +174,6 @@ export function registerOmpPiGate(
   const fallbackSessionId = `omp-${process.pid}-${Date.now()}`
   let sessionNoteSent = false
 
-  pi.setLabel?.("Hierarchical implementation gate")
-
   pi.on("session_switch", () => {
     sessionNoteSent = false
   })

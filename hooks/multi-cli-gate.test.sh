@@ -61,7 +61,7 @@ agy_sub_edit=$(jq -cn --arg p "$W/src/a.ts" --arg c "$W" --arg t "$sub_tr" '{
   toolCall:{id:"tc2",name:"edit_file",args:{Path:$p,Target:"one",Replacement:"uno"}}
 }')
 out=$(agy_run "$agy_sub_edit")
-assert_eq "agy: subagent detected via transcriptPath is never gated" "$out" "{}"
+assert_eq "agy: subagent detected via transcriptPath is never gated" "$out" '{"decision":"ask"}'
 
 # Subagent detection via explicit parentConversationId
 agy_sub_parent=$(jq -cn --arg p "$W/src/a.ts" --arg c "$W" '{
@@ -71,11 +71,11 @@ agy_sub_parent=$(jq -cn --arg p "$W/src/a.ts" --arg c "$W" '{
   cwd:$c,
   toolCall:{id:"tc3",name:"write_file",args:{Path:$p,Content:"hello\n"}}
 }')
-assert_eq "agy: subagent detected via parentConversationId is never gated" "$(agy_run "$agy_sub_parent")" "{}"
+assert_eq "agy: subagent detected via parentConversationId is never gated" "$(agy_run "$agy_sub_parent")" '{"decision":"ask"}'
 
-# HIERARCHICAL_GATE=off still emits valid JSON for AGY
+# HIERARCHICAL_GATE=off still emits valid PreToolUse JSON for AGY
 out=$(HIERARCHICAL_GATE=off bash "$HOOK" --harness agy <<<"$agy_edit")
-assert_eq "agy: HIERARCHICAL_GATE=off returns empty JSON object" "$out" "{}"
+assert_eq "agy: HIERARCHICAL_GATE=off returns decision:ask on PreToolUse" "$out" '{"decision":"ask"}'
 
 # AGY decide auto-approval on run_command
 agy_decide_cmd=$(jq -cn --arg cmd "$HOOK decide $W agy-main-1 delegate \"parser and cli units\"" --arg c "$W" '{
@@ -102,7 +102,7 @@ agy_research_pre=$(jq -cn --arg c "$W" '{
   cwd:$c,
   toolCall:{id:"tc6",name:"invoke_subagent",args:{TypeName:"research",Role:"explorer",Prompt:"read code"}}
 }')
-assert_eq "agy: research invoke_subagent before decision passes through" "$(agy_run "$agy_research_pre")" "{}"
+assert_eq "agy: research invoke_subagent before decision passes through" "$(agy_run "$agy_research_pre")" '{"decision":"ask"}'
 
 # Record delegate, verify no-worker deny, log PostToolUse spawn + message, then allow integration edit
 bash "$HOOK" decide "$W" agy-main-1 delegate "parser and cli units" >/dev/null
@@ -116,7 +116,7 @@ agy_post_spawn=$(jq -cn --arg c "$W" '{
   toolCall:{id:"tc7",name:"invoke_subagent",args:{TypeName:"worker",Role:"parser",Model:"inherit"}}
 }')
 assert_eq "agy: PostToolUse invoke_subagent returns {}" "$(agy_run "$agy_post_spawn")" "{}"
-assert_eq "agy: driver edit allowed after worker spawn" "$(agy_run "$agy_edit")" "{}"
+assert_eq "agy: driver edit allowed after worker spawn" "$(agy_run "$agy_edit")" '{"decision":"ask"}'
 
 # AGY SessionStart injects systemMessage when HI_FREE_WORKERS=1
 agy_ss=$(jq -cn --arg c "$W" '{hookEventName:"SessionStart",conversationId:"agy-main-1",cwd:$c}')
@@ -126,7 +126,7 @@ assert_eq "agy: SessionStart without HI_FREE_WORKERS returns {}" "$(agy_run "$ag
 
 # AGY wrapper script works end-to-end
 out=$(bash "$ROOT/adapters/agy/gate.sh" <<<"$agy_edit")
-assert_eq "agy: adapters/agy/gate.sh wrapper passes allowed edit" "$out" "{}"
+assert_eq "agy: adapters/agy/gate.sh wrapper passes allowed edit" "$out" '{"decision":"ask"}'
 
 # --- CODEX ---
 codex_run() { bash "$HOOK" --harness codex <<<"$1"; }
