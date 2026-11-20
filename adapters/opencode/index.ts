@@ -19,6 +19,7 @@ export default Plugin.define({
               callback({
                 tool: event.tool,
                 sessionID: String(event.sessionID),
+                agent: typeof (event as { agent?: unknown }).agent === "string" ? (event as { agent: string }).agent : undefined,
                 id: String(event.id),
                 input: event.input,
               }),
@@ -28,6 +29,7 @@ export default Plugin.define({
             callback({
               tool: event.tool,
               sessionID: String(event.sessionID),
+              agent: typeof (event as { agent?: unknown }).agent === "string" ? (event as { agent: string }).agent : undefined,
               id: String(event.id),
               input: event.input,
               status: event.status,

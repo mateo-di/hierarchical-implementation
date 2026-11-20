@@ -137,7 +137,7 @@ codex_patch=$(jq -cn --arg p "$patch_body" --arg c "$W" '{
   tool_name:"apply_patch",
   session_id:"codex_sess_1",
   cwd:$c,
-  tool_input:{input:$p}
+  tool_input:{command:$p}
 }')
 out=$(codex_run "$codex_patch")
 assert_eq "codex: undecided apply_patch is denied" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$out")" "deny"

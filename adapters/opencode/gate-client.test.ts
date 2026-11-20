@@ -35,8 +35,9 @@ function setupFixture() {
   delete env.HIERARCHICAL_GATE
 
   const sessions = new Map<string, OpenCodeSessionInfo>([
-    ["ses_root1", { id: "ses_root1", location: { directory: repo } }],
-    ["ses_child1", { id: "ses_child1", parentID: "ses_root1", location: { directory: repo } }],
+    ["ses_root1", { id: "ses_root1", agent: "build", location: { directory: repo } }],
+    ["ses_child1", { id: "ses_child1", parentID: "ses_root1", agent: "general", location: { directory: repo } }],
+    ["ses_lane1", { id: "ses_lane1", agent: "lane-worker", location: { directory: repo } }],
   ])
 
   let beforeHook: ((event: OpenCodeToolBeforeEvent) => Promise<void> | void) | undefined
@@ -86,6 +87,16 @@ test("opencode adapter denies undecided root edit, allows subagent edit, and unl
     // Child subagent session is never gated.
     await fx.before({ tool: "edit", sessionID: "ses_child1", input: { path: "src/a.ts", oldString: "one", newString: "uno" } })
 
+    // Headless free-models.sh lane-worker session is never gated (it cannot run decide).
+    await fx.before({ tool: "edit", sessionID: "ses_lane1", agent: "lane-worker", input: { path: "src/a.ts", oldString: "one", newString: "uno" } })
+
+    // Spawning general before any decision is denied; explore (read-only) passes.
+    await fx.before({ tool: "subagent", sessionID: "ses_root1", input: { agent: "explore", description: "read code" } })
+    await assert.rejects(
+      () => fx.before({ tool: "subagent", sessionID: "ses_root1", input: { agent: "general", name: "parser", model: "opencode-go/hy4-flash-free" } }),
+      /Record the decision before the first worker/,
+    )
+
     // Decide command itself passes through shell pre-check.
     await fx.before({
       tool: "shell",
@@ -100,13 +111,23 @@ test("opencode adapter denies undecided root edit, allows subagent edit, and unl
       /has not spawned a worker/,
     )
 
-    // Spawning a subagent logs the worker and unlocks driver integration edits.
+    // Spawning a subagent logs the worker, tracks its child session for message attribution, and unlocks driver edits.
     await fx.after({
       tool: "subagent",
       sessionID: "ses_root1",
       status: "completed",
-      input: { agent: "general", name: "parser", model: "openai/gpt-5" },
+      input: { agent: "general", name: "parser", model: "opencode-go/hy4-flash-free" },
+      result: { metadata: { sessionID: "ses_child1" } },
     })
+    await fx.after({
+      tool: "subagent",
+      sessionID: "ses_root1",
+      status: "completed",
+      input: { sessionID: "ses_child1", prompt: "Fix edge case" },
+    })
+    const events = fs.readFileSync(fx.env.DELEGATION_EVENTS!, "utf8")
+    assert.match(events, /\tspawn\tparser\topencode-go\/hy4-flash-free\tgeneral/)
+    assert.match(events, /\tmessage\tparser\t/)
     await fx.before({ tool: "edit", sessionID: "ses_root1", input: { path: "src/a.ts", oldString: "one", newString: "uno" } })
   } finally {
     fx.cleanup()

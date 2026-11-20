@@ -22,12 +22,14 @@ export type GateRunner = (payload: Record<string, unknown>, env?: NodeJS.Process
 export type OpenCodeSessionInfo = {
   id?: string
   parentID?: string
+  agent?: string
   location?: { directory?: string }
 }
 
 export type OpenCodeToolBeforeEvent = {
   tool: string
   sessionID: string
+  agent?: string
   id?: string
   input: unknown
 }
@@ -129,7 +131,17 @@ export function createGateRunner(scriptPath = DEFAULT_GATE_SCRIPT): GateRunner {
 
 const EDIT_TOOLS = new Set(["edit", "write", "patch", "multiedit"])
 const SHELL_TOOLS = new Set(["shell", "bash"])
-const UNIT_AGENTS = new Set(["worker", "hierarchical-implementation:worker"])
+const UNIT_AGENTS = new Set(["worker", "hierarchical-implementation:worker", "general"])
+
+function childSessionIDFromResult(result: unknown): string | undefined {
+  if (!isRecord(result)) return undefined
+  for (const candidate of [result, result.output, result.metadata]) {
+    if (isRecord(candidate) && typeof candidate.sessionID === "string" && candidate.sessionID.length > 0) {
+      return candidate.sessionID
+    }
+  }
+  return undefined
+}
 
 function workerModelFromInput(input: Record<string, unknown>): string {
   if (typeof input.model === "string") return input.model
@@ -145,11 +157,15 @@ function workerModelFromInput(input: Record<string, unknown>): string {
 export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<void> {
   const baseRunner = runtime.runGate ?? createGateRunner(runtime.gateScript)
   const runGate: GateRunner = (payload) => baseRunner(payload, runtime.env)
+  const freeWorkerAgent = (runtime.env?.HI_FREE_AGENT || process.env.HI_FREE_AGENT || "lane-worker").toLowerCase()
+  const childWorkerNames = new Map<string, string>()
 
-  async function resolveRootSession(sessionID: string): Promise<{ cwd: string } | undefined> {
+  async function resolveRootSession(sessionID: string, eventAgent?: string): Promise<{ cwd: string } | undefined> {
+    if (eventAgent && eventAgent.toLowerCase() === freeWorkerAgent) return undefined
     try {
       const session = await runtime.session.get(sessionID)
       if (!session || session.parentID) return undefined
+      if (session.agent && session.agent.toLowerCase() === freeWorkerAgent) return undefined
       return { cwd: session.location?.directory || process.cwd() }
     } catch {
       return undefined
@@ -157,7 +173,7 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
   }
 
   await runtime.tool.hook("execute.before", async (event) => {
-    const root = await resolveRootSession(event.sessionID)
+    const root = await resolveRootSession(event.sessionID, event.agent)
     if (!root) return
 
     let payload: Record<string, unknown> | undefined
@@ -198,7 +214,7 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
   await runtime.tool.hook("execute.after", async (rawEvent) => {
     const event = rawEvent as OpenCodeToolAfterEvent
     if (event.status === "error") return
-    const root = await resolveRootSession(event.sessionID)
+    const root = await resolveRootSession(event.sessionID, event.agent)
     if (!root) return
 
     if (SHELL_TOOLS.has(event.tool) && isRecord(event.input)) {
@@ -211,6 +227,7 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
     if (event.tool === "subagent" && isRecord(event.input)) {
       const resumeID = stringValue(event.input.sessionID)
       if (resumeID) {
+        const targetName = childWorkerNames.get(resumeID) ?? stringValue(event.input.name) ?? resumeID
         await runGate({
           event: "post_tool",
           harness: "opencode",
@@ -218,13 +235,15 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
           cwd: root.cwd,
           tool: event.tool,
           action: "message",
-          worker: { name: stringValue(event.input.name) ?? resumeID },
+          worker: { name: targetName },
         })
         return
       }
       const agent = stringValue(event.input.agent) ?? "general"
       const name = stringValue(event.input.name) ?? stringValue(event.input.description) ?? agent
       const model = workerModelFromInput(event.input)
+      const childID = childSessionIDFromResult(event.result)
+      if (childID) childWorkerNames.set(childID, name)
       await runGate({
         event: "post_tool",
         harness: "opencode",

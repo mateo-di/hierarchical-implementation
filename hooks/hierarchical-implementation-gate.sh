@@ -1033,7 +1033,7 @@ case $PROTO in
     root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || exit 0
     case $tool in
       apply_patch)
-        patch=$(jq -r 'if (.tool_input | type) == "string" then .tool_input else (.tool_input.input // .tool_input.patch // .tool_input.patchText // "") end' <<<"$input" 2>/dev/null) || exit 0
+        patch=$(jq -r 'if (.tool_input | type) == "string" then .tool_input else (.tool_input.command // .tool_input.input // .tool_input.patch // .tool_input.patchText // "") end' <<<"$input" 2>/dev/null) || exit 0
         check_patch_text "$patch"
         ;;
       Edit | Write | MultiEdit | NotebookEdit | edit_file | write_file)
