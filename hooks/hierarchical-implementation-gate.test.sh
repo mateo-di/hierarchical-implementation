@@ -202,6 +202,9 @@ check none "a message to a teammate the session did not spawn is logged" "$(tool
 events=$(awk -F'\t' '$2 == "s3" && $3 != "deny"' "$DELEGATION_EVENTS" | cut -f2-4,6)
 [[ $events == $'s3\tspawn\tearly\tgeneral-purpose\ns3\tspawn\t\tExplore\ns3\tspawn\tpm\tproject-manager\ns3\tspawn\timporter\t\ns3\tmessage\timporter\t\ns3\tmessage\tteam-lead\t' ]] &&
   pass "events log session, kind, target and agent type" || fail "events: $events"
+resolved() { jq -c --arg m "$1" '. + {tool_response:{status:"async_launched",resolvedModel:$m}}'; } # resolved <model>: adds the Agent result's model to a payload
+check none "a spawn whose result names its model is logged" "$(tool PostToolUse Agent s3m '{"name":"scout","model":"opus","prompt":"x","subagent_type":"Explore"}' | resolved claude-sonnet-5-5)"
+grep -q $'\ts3m\tspawn\tscout\tclaude-sonnet-5-5\tExplore$' "$DELEGATION_EVENTS" && pass "the model the spawn resolved to is logged, not the one it asked for" || fail "resolved model events: $(grep s3m "$DELEGATION_EVENTS")"
 denied=$(awk -F'\t' '$2 == "s3" && $3 == "deny" && $4 == "Edit" && $6 == "no-worker"' "$DELEGATION_EVENTS" | grep -c .)
 [[ $denied -ge 3 ]] && pass "each denial is logged with its tool and kind" || fail "deny events for s3: $denied"
 check deny "a session that never decides is denied" "$(edit "$W/src/a.ts" s0u)"
@@ -319,6 +322,15 @@ check none "a named worker with model is allowed" "$(tool PreToolUse Agent s1 '{
 check none "an unnamed agent is allowed" "$(tool PreToolUse Agent s1 '{"prompt":"x","subagent_type":"Explore"}')"
 check none "a fork is allowed" "$(tool PreToolUse Agent s1 '{"name":"f1","prompt":"x","subagent_type":"fork"}')"
 check none "a session the gate never saw is not asked for a model" "$(tool PreToolUse Agent fresh '{"name":"w1","prompt":"x"}')"
+echeck() { # echeck <none|deny> <label> <payload> VAR=value...: check with extra environment
+  local want=$1 label=$2 payload=$3 got
+  shift 3
+  got=$(verdict "$(env "$@" bash "$HOOK" <<<"$payload")")
+  [[ $got == "$want" ]] && pass "$label" || fail "$label (expected $want, got $got)"
+}
+echeck none "with the subagent model forced, a named worker needs no model" "$(tool PreToolUse Agent s1 '{"name":"w1","prompt":"x"}')" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1
+echeck none "CLAUDE_CODE_SUBAGENT_MODEL_FORCE=true counts as forced" "$(tool PreToolUse Agent s1 '{"name":"w1","prompt":"x"}')" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=true
+echeck deny "CLAUDE_CODE_SUBAGENT_MODEL_FORCE=0 still asks for a model" "$(tool PreToolUse Agent s1 '{"name":"w1","prompt":"x"}')" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=0
 
 # a worker, like the first edit, needs a decision, so a task that only delegates still records one
 worker='{"name":"w1","model":"sonnet","prompt":"x","subagent_type":"hierarchical-implementation:worker"}'
@@ -414,6 +426,9 @@ fcheck deny "free-first: another session's run does not count" "$(tool PreToolUs
 check none "free-first: a run with a quoted unit name is logged" "$(free "free-models.sh run $W \"lexer\" /tmp/brief.md" sf1)"
 fcheck none "free-first: a quoted unit name matches the worker's name" "$(tool PreToolUse Agent sf1 "$(fw lexer)")"
 fcheck deny "free-first: an events log in a directory not created yet still asks" "$(tool PreToolUse Agent sf1 "$(fw parser)")" DELEGATION_EVENTS="$T/new-events/events.tsv"
+got=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 bash "$HOOK" <<<"$(tool PreToolUse Agent sf2 '{"name":"lexer","prompt":"x","subagent_type":"worker"}')" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+[[ $got == "Free-model workers are on"* && $got == *"not available while CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on." ]] && pass "free-first: with the subagent model forced, a worker with no model still waits for a free run, and a named model is unavailable" || fail "free-first forced: $got"
+fcheck none "free-first: with the subagent model forced, a worker with no model starts after its run" "$(tool PreToolUse Agent sf1 '{"name":"lexer","prompt":"x","subagent_type":"worker"}')" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1
 grep -q $'\tsf1\tdeny\tAgent\t\tfree-first$' "$DELEGATION_EVENTS" && pass "free-first: a denial is logged with its kind" || fail "free-first deny events: $(grep sf1 "$DELEGATION_EVENTS")"
 start() { jq -cn '{hook_event_name:"SessionStart",session_id:"ss1",cwd:"/",source:"startup"}'; }
 out=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" bash "$HOOK" <<<"$(start)")

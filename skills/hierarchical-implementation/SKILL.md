@@ -44,7 +44,10 @@ editing workers with `subagent_type: "hierarchical-implementation:worker"`, a le
 file and shell tools that starts with about a third of a general-purpose agent's context, and
 `model: "sonnet"` unless the user named another model. Use `general-purpose` only when the
 plugin's agent is unavailable. On Bedrock or Vertex, check that the alias resolves to the
-intended model version; if it does not, ask the user which worker model to use.
+intended model version; if it does not, ask the user which worker model to use. An Agent tool
+with no `model` parameter means `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` is on and every subagent runs
+the model it sets: leave `model` out, and tell the user that a council or an Agent model they
+named is not available.
 
 1. **Split and brief.** Explore only as far as the brief needs, then hand off; settle a costly
    design choice no test can decide with a council (below) first. One worker per independently
