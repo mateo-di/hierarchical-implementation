@@ -46,10 +46,22 @@
 # character set are never gated. Fails open on any resolution error, including state it cannot
 # write. HIERARCHICAL_GATE=off disables it. Written for bash 3.2, the macOS default.
 #
+#   hierarchical-implementation-gate.sh [--harness <claude|agy|codex|gemini|cursor|opencode|omp|pi|generic>]
 #   hierarchical-implementation-gate.sh decide <worktree> <session> delegate "<units>"
 #   hierarchical-implementation-gate.sh decide <worktree> <session> direct "<exemption>: <why>"
 #   hierarchical-implementation-gate.sh decide <worktree> <session> direct "security: <why>" <file>...
 #   hierarchical-implementation-gate.sh report
+
+HARNESS="${HIERARCHICAL_GATE_HARNESS:-claude}"
+if [[ ${1:-} == --harness ]]; then
+  HARNESS="${2:-claude}"
+  shift 2 2>/dev/null || shift $#
+fi
+SELF=$0
+SELF_ABS=$(cd "$(dirname "$0")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$0")") || SELF_ABS=$0
+if [[ $HARNESS != claude && $SELF != /* && -n $SELF_ABS ]]; then
+  SELF=$SELF_ABS
+fi
 
 GIT_BIN="${GIT_BIN:-git}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-gates"
@@ -71,13 +83,13 @@ INTEGRATE_MAX_LINES="${INTEGRATE_MAX_LINES:-60}"
 # and hooks (also as chezmoi sources, with chezmoi's exact_, private_ and readonly_ prefixes), skill
 # definitions, and files that hold secrets: data and config files whose name or directory says so,
 # not the code that handles them. CI, ownership and IAM files are not among them. A plugin's hooks,
-# skills, agents and commands are controls too; security_path checks those in code.
-SECURITY_PATHS="${SECURITY_PATHS:-(^|/)(CLAUDE|AGENTS|GEMINI)(\.local)?\.md(\.tmpl)?$|(^|/)SKILL\.md$|(^|/)((exact|private|readonly)_)*(dot_|\.)(claude|claude-plugin|codex|opencode|cursor|gemini|agents)(/|$)|(^|/)((exact|private|readonly)_)*(dot_config|\.config)/((exact|private|readonly)_)*(claude|codex|opencode)(/|$)|(^|/)\.chezmoitemplates/[^/]*(claude|codex|opencode)|(^|/)(opencode\.jsonc?|\.mcp\.json)$|(^|/)\.env(\.[^/]*)?$|(^|/)([^/]*[._-])?(secrets?|credentials?|keychain)([_-][^/.]*)?(\.(ya?ml|json|toml|ini|conf|cfg|properties|txt|enc|age|gpg))?$|(^|/)(secrets?|credentials?)/([^/]+/)*[^/]+\.(ya?ml|json|toml|ini|conf|cfg|properties|txt|enc|age|gpg)$|\.(pem|key|p12)$}"
+# skills, agents, commands and adapters are controls too; security_path checks those in code.
+SECURITY_PATHS="${SECURITY_PATHS:-(^|/)(CLAUDE|AGENTS|GEMINI)(\.local)?\.md(\.tmpl)?$|(^|/)SKILL\.md$|(^|/)((exact|private|readonly)_)*(dot_|\.)(claude|claude-plugin|codex|codex-plugin|opencode|cursor|cursor-plugin|gemini|gemini-plugin|antigravity-plugin|omp|omp-plugin|pi|agents)(/|$)|(^|/)((exact|private|readonly)_)*(dot_config|\.config)/((exact|private|readonly)_)*(claude|codex|opencode|omp|pi|cursor|gemini)(/|$)|(^|/)\.chezmoitemplates/[^/]*(claude|codex|opencode|omp|gemini)|(^|/)(opencode\.jsonc?|\.mcp\.json|gemini-extension\.json)$|(^|/)\.env(\.[^/]*)?$|(^|/)([^/]*[._-])?(secrets?|credentials?|keychain)([_-][^/.]*)?(\.(ya?ml|json|toml|ini|conf|cfg|properties|txt|enc|age|gpg))?$|(^|/)(secrets?|credentials?)/([^/]+/)*[^/]+\.(ya?ml|json|toml|ini|conf|cfg|properties|txt|enc|age|gpg)$|\.(pem|key|p12)$}"
 # Agent types that count as an editing worker under delegate; a named agent with no type is the
 # default general-purpose agent. worker is the plugin's agent copied into ~/.claude/agents, and
 # free-models is the type this hook logs for a free-models.sh run, so an override keeps it.
 # Specialists that only read, plan or keep records do not count.
-WORKER_TYPES="${WORKER_TYPES:-general-purpose|worker|hierarchical-implementation:worker|fork|free-models}"
+WORKER_TYPES="${WORKER_TYPES:-general-purpose|worker|hierarchical-implementation:worker|fork|free-models|self|general|task|subagent|coding|default|swarm}"
 # The worker types that exist only to edit a unit, so a spawn of one starts a delegated task and
 # needs a decision first; general-purpose agents and forks also research and review. Written
 # folded the way Claude Code matches a subagent_type: lowercase, without spaces, dashes or
@@ -86,7 +98,7 @@ UNIT_WORKER_TYPES='worker|hierarchicalimplementation:worker'
 MAX_TARGETS=20 # distinct files one shell command may write; more is denied, which bounds the hook's run time
 EXEMPTIONS='trivial|security|lane|opt-out|no-subagents'
 PLAIN_SET='[A-Za-z0-9._/@+-]'
-SID_SET='[A-Za-z0-9-]'
+SID_SET='[A-Za-z0-9_-]'
 PLAIN='^'$PLAIN_SET'+$'
 SID='^'$SID_SET'+$'
 NUM='^[0-9]+$'
@@ -199,18 +211,30 @@ claim() { # claim <base> <path>: true when the path is one of the files the triv
   return 1
 }
 
+has_plugin_manifest() { # has_plugin_manifest <top> <prefix>: true when a tracked plugin manifest marks <prefix>
+  local top=$1 p=$2 m
+  for m in .claude-plugin/plugin.json .antigravity-plugin/plugin.json .omp-plugin/marketplace.json .codex-plugin/plugin.json .cursor-plugin/plugin.json gemini-extension.json; do
+    git_ -C "$top" ls-files --error-unmatch -- "${p}${m}" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 security_path() { # security_path <top> <path> -> true for an agent-control or secrets path inside top
   local rel=${2#"$1"/} dir parent
   [[ $rel =~ $SECURITY_PATHS ]] && return 0
-  # A plugin's hooks, skills, agents and commands are controls too. A tracked manifest marks the
-  # plugin, since a bare .claude-plugin directory costs one mkdir the hook does not see.
+  # A plugin's hooks, skills, agents, commands and adapters are controls too. A tracked manifest
+  # marks the plugin, since a bare .claude-plugin directory costs one mkdir the hook does not see.
+  if [[ $rel == hooks.json || $rel == */hooks.json ]]; then
+    parent=${rel%hooks.json}
+    has_plugin_manifest "$1" "$parent" && return 0
+  fi
   dir=$rel
   while [[ $dir == */* ]]; do
     dir=${dir%/*}
-    case /$dir in */hooks | */skills | */agents | */commands) ;; *) continue ;; esac
+    case /$dir in */hooks | */skills | */agents | */commands | */adapters) ;; *) continue ;; esac
     parent=${dir%/*}
     [[ $parent == "$dir" ]] && parent="" || parent=$parent/
-    git_ -C "$1" ls-files --error-unmatch -- "${parent}.claude-plugin/plugin.json" >/dev/null 2>&1 && return 0
+    has_plugin_manifest "$1" "$parent" && return 0
   done
   return 1
 }
@@ -232,13 +256,32 @@ record() { # record <base> <top> <choice> <reason> [named file...]: writes a dec
 }
 
 # The policy these texts and undecided_spawn's deny state also lives in SKILL.md, README.md,
-# examples/CLAUDE.md and the user's CLAUDE.md, and the test suite pins parts of it; change them
-# together.
+# examples/CLAUDE.md, examples/AGENTS.md and the user's CLAUDE.md, and the test suite pins parts of
+# it; change them together.
 delegate_how() { # delegate_how <top>
-  printf '%s' "run $0 decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill (hierarchical-implementation:hierarchical-implementation when installed as a plugin), and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a named worker (subagent_type hierarchical-implementation:worker, or general-purpose) with model set, including the file in this edit. Review each result critically, send numbered corrections to the same worker with SendMessage or re-brief a fresh worker, stop after three rounds, and edit here only to integrate. While a /repro gate is open here, the worker works in this worktree."
+  case $HARNESS in
+    claude)
+      printf '%s' "run $SELF decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill (hierarchical-implementation:hierarchical-implementation when installed as a plugin), and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a named worker (subagent_type hierarchical-implementation:worker, or general-purpose) with model set, including the file in this edit. Review each result critically, send numbered corrections to the same worker with SendMessage or re-brief a fresh worker, stop after three rounds, and edit here only to integrate. While a /repro gate is open here, the worker works in this worktree."
+      ;;
+    agy)
+      printf '%s' "run $SELF decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill, and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a worker subagent via invoke_subagent (or swarm) with a clear role/name, including the file in this edit. Review each result critically, send numbered corrections to the same worker with send_message or re-brief a fresh worker, stop after three rounds, and edit here only to integrate."
+      ;;
+    opencode)
+      printf '%s' "run $SELF decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill, and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a worker via the subagent tool, including the file in this edit. Review each result critically, send numbered corrections to the same child session or re-brief a fresh worker, stop after three rounds, and edit here only to integrate."
+      ;;
+    omp)
+      printf '%s' "run $SELF decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill, and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a named worker via the task tool (agent worker or task), including the file in this edit. Review each result critically, send numbered corrections or re-brief a fresh worker, stop after three rounds, and edit here only to integrate."
+      ;;
+    codex)
+      printf '%s' "run $SELF decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill, and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a worker via spawn_agent, including the file in this edit. Review each result critically, send numbered corrections with send_input or re-brief a fresh worker, stop after three rounds, and edit here only to integrate."
+      ;;
+    *)
+      printf '%s' "run $SELF decide $1 $session delegate \"<the units, plain words>\", load the hierarchical-implementation skill, and give each unit (disjoint files, separate tests, no shared interface change; a coupled change is one unit) to a worker subagent or free-models.sh run, including the file in this edit. Review each result critically, send numbered corrections or re-brief a fresh worker, stop after three rounds, and edit here only to integrate."
+      ;;
+  esac
 }
 direct_how() { # direct_how <top>
-  printf '%s' "run $0 decide $1 $session direct \"<exemption>: <why, plain words>\" and retry; a security exemption also lists every file it covers after the reason, as paths relative to $1. Write reasons in plain words, without backticks, quotes, dollar signs, exclamation marks or backslashes"
+  printf '%s' "run $SELF decide $1 $session direct \"<exemption>: <why, plain words>\" and retry; a security exemption also lists every file it covers after the reason, as paths relative to $1. Write reasons in plain words, without backticks, quotes, dollar signs, exclamation marks or backslashes"
 }
 instead_how() { # instead_how <top> -> the ways out of a trivial exemption the task outgrew
   printf '%s' "Delegate: $(delegate_how "$1") Or record a different exemption: $(direct_how "$1")"
@@ -269,8 +312,8 @@ gate() { # gate <file> <changed lines it adds> -> prints a deny (kind and reason
   repo_of "$real" || return 0
   base=$(state_base "$session" "$gitdir") || return 0
   mkdir -p "${base%/*}" 2>/dev/null && [[ -w ${base%/*} ]] || return 0
-  if ! [[ $top =~ $PLAIN && $0 =~ $PLAIN ]]; then
-    echo "hierarchical-implementation gate: not gating $top, because it or $0 has characters outside the plain set" >&2
+  if ! [[ $top =~ $PLAIN && $SELF =~ $PLAIN ]]; then
+    echo "hierarchical-implementation gate: not gating $top, because it or $SELF has characters outside the plain set" >&2
     return 0
   fi
   if [[ ! -f $base.decision ]]; then
@@ -291,12 +334,20 @@ scope() { # scope <base> <top> <changed lines> -> prints a deny when the recorde
       events_dir=$(dirname "$DELEGATION_EVENTS")
       [[ -d $events_dir && -w $events_dir ]] || return 0
       if ! worker_spawned "$base"; then
-        deny no-worker "This session recorded delegate for $top but has not spawned a named worker since then (an Agent call with subagent_type hierarchical-implementation:worker or general-purpose, or a free-models.sh run; read-only and bookkeeping agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, or start the skill's free-models.sh run for a free-model worker, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
+        if [[ $HARNESS == claude ]]; then
+          deny no-worker "This session recorded delegate for $top but has not spawned a named worker since then (an Agent call with subagent_type hierarchical-implementation:worker or general-purpose, or a free-models.sh run; read-only and bookkeeping agents do not count), so there is nothing to integrate yet. Spawn the named workers with the Agent tool and model set first, or start the skill's free-models.sh run for a free-model worker, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
+        else
+          deny no-worker "This session recorded delegate for $top but has not spawned a worker since then (a worker subagent call or a free-models.sh run; read-only and bookkeeping agents do not count), so there is nothing to integrate yet. Spawn the workers first, then edit here only to integrate. If the task is in fact an exemption, $(direct_how "$top")."
+        fi
         return 0
       fi
       used=$(total "$base.driver")
       if ((used + n > INTEGRATE_MAX_LINES)); then
-        deny budget "Under delegate the driver's own edits in $top would reach $((used + n)) changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file with SendMessage, or spawn a worker for it. If the user asked you to finish it yourself, run $0 decide $top $session direct \"opt-out: <what the user said>\"."
+        if [[ $HARNESS == claude ]]; then
+          deny budget "Under delegate the driver's own edits in $top would reach $((used + n)) changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file with SendMessage, or spawn a worker for it. If the user asked you to finish it yourself, run $SELF decide $top $session direct \"opt-out: <what the user said>\"."
+        else
+          deny budget "Under delegate the driver's own edits in $top would reach $((used + n)) changed lines, past the integration budget of $INTEGRATE_MAX_LINES: that is authoring, not integration. Send the change to the worker that owns the file, or spawn a worker for it. If the user asked you to finish it yourself, run $SELF decide $top $session direct \"opt-out: <what the user said>\"."
+        fi
       else
         echo "$n" >>"$base.driver"
       fi
@@ -320,7 +371,7 @@ scope() { # scope <base> <top> <changed lines> -> prints a deny when the recorde
       ;;
     direct:security:*)
       grep -qxF -- "$path" "$base.security" 2>/dev/null && security_path "$top" "$path" ||
-        deny security "The security exemption recorded for $top covers only the agent-control or secrets files named when it was recorded, and $path is not one of them. If this file also edits the agent's own controls or holds secrets, add it: run $0 decide $top $session direct \"security: <why, plain words>\" <file>. Otherwise give it to a named worker with the Agent tool and model set; subagent edits are not gated, while recording delegate here would drop the security scope."
+        deny security "The security exemption recorded for $top covers only the agent-control or secrets files named when it was recorded, and $path is not one of them. If this file also edits the agent's own controls or holds secrets, add it: run $SELF decide $top $session direct \"security: <why, plain words>\" <file>. Otherwise give it to a named worker with the Agent tool and model set; subagent edits are not gated, while recording delegate here would drop the security scope."
       ;;
     direct:lane:*)
       [[ ${LANE_MODE:-} == unit ]] ||
@@ -338,29 +389,31 @@ undecided_spawn() { # undecided_spawn -> prints a deny when the session, working
   local here top gitdir f dir=$STATE_DIR/delegation/$session
   [[ $session =~ $SID ]] || return 0
   here=$(cd "$cwd" 2>/dev/null && pwd -P) && [[ $here == "$root"/* ]] || return 0
-  repo_of "$here" && [[ $top =~ $PLAIN && $0 =~ $PLAIN ]] || return 0
+  repo_of "$here" && [[ $top =~ $PLAIN && $SELF =~ $PLAIN ]] || return 0
   mkdir -p "$dir" 2>/dev/null && [[ -w $dir ]] || return 0 # decide could not record here, so it could never clear the deny
   for f in "$dir"/*.decision; do [[ -f $f ]] && return 0; done # the quoted prefix is matched literally
-  deny undecided "Record the decision before the first worker, as before the first edit, so every delegated task leaves one in the log: run $0 decide $top $session delegate \"<the units, plain words>\", naming the worktree the workers will edit if it is not $top, then retry this call. If the task is in fact one of the exemptions (${EXEMPTIONS//|/, }), $(direct_how "$top").$LANE_HINT An agent that only reads, reviews or researches needs no decision: spawn it as Explore."
+  deny undecided "Record the decision before the first worker, as before the first edit, so every delegated task leaves one in the log: run $SELF decide $top $session delegate \"<the units, plain words>\", naming the worktree the workers will edit if it is not $top, then retry this call. If the task is in fact one of the exemptions (${EXEMPTIONS//|/, }), $(direct_how "$top").$LANE_HINT An agent that only reads, reviews or researches needs no decision: spawn it as Explore."
 }
 
-free_first() { # free_first -> prints a deny when free-model workers are on and the plugin's worker starts on sonnet before a free-model run for its unit
+free_first() { # free_first [worker_name] [worker_model] -> prints a deny when free-model workers are on and the plugin's worker starts on sonnet before a free-model run for its unit
   # With HI_FREE_WORKERS=1 the skill tries each editing unit on a free model and falls back to an
   # Agent worker when the run exits 3. Drivers skipped that prose, so the spawn waits for a logged
   # run whose name is the worker's name, or its prefix before a dash (a redo or a best-of-N attempt
   # of that unit). A worker on another model passes, since the user may have named it, and driver
   # lanes never use free models.
-  local name model here script named="If the user named this worker's model, pass that model instead."
+  local name=${1:-} model=${2:-} here script named="If the user named this worker's model, pass that model instead."
   [[ ${HI_FREE_WORKERS:-} == 1 && ${LANE_MODE:-} != driver && $session =~ $SID ]] || return 0
   command -v "${OPENCODE_BIN:-opencode}" >/dev/null 2>&1 || return 0
   mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null && [[ -w $(dirname "$DELEGATION_EVENTS") ]] || return 0 # a run could not be logged here, so it could never clear the deny
   here=$(cd "$cwd" 2>/dev/null && pwd -P) && [[ $here == "$root"/* ]] || return 0
-  IFS=$US read -r name model < <(jq -r '[.tool_input.name // "", .tool_input.model // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null)
+  if (($# == 0)); then
+    IFS=$US read -r name model < <(jq -r '[.tool_input.name // "", .tool_input.model // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null)
+  fi
   case $model in '' | *[Ss][Oo][Nn][Nn][Ee][Tt]*) ;; *) return 0 ;; esac
   [[ -n $name ]] && S=$session N=$name awk -F'\t' '
     $2 == ENVIRON["S"] && $3 == "spawn" && $6 == "free-models" && (ENVIRON["N"] == $4 || index(ENVIRON["N"], $4 "-") == 1) { f = 1; exit }
     END { exit !f }' "$DELEGATION_EVENTS" 2>/dev/null && return 0
-  script=${0%/hooks/*}/skills/hierarchical-implementation/scripts/free-models.sh
+  script=${SELF%/hooks/*}/skills/hierarchical-implementation/scripts/free-models.sh
   [[ -f $script ]] || script="the skill's scripts/free-models.sh"
   subagent_model_forced && named="If the user named this worker's model, tell them it is not available while CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on."
   deny free-first "Free-model workers are on (HI_FREE_WORKERS=1), so each editing unit tries a free model before an Agent worker. Read references/free-models.md in the hierarchical-implementation skill, write the brief to a file outside the worktree, and run $script run <worktree> ${name:-<unit name>} <brief-file> with run_in_background. If it exits 3, retry this spawn with name set to the same unit name, or that name plus a dash and a suffix for a redo. $named"
@@ -372,10 +425,36 @@ subagent_model_forced() { # true when CLAUDE_CODE_SUBAGENT_MODEL_FORCE holds a v
 }
 
 own_decide() { # own_decide <command>: true when the command is exactly this script's decide call, with inert arguments, for the calling session
-  local args=${1#"$0 decide "}
-  [[ $0 =~ $PLAIN && $1 == "$0 decide "* && $1 != *$'\n'* && $args =~ $DECIDE_ARGS ]] || return 1
+  local prefix args=""
+  [[ $1 != *$'\n'* ]] || return 1
+  for prefix in "$SELF" "$0" "$SELF_ABS"; do
+    [[ -n $prefix && $prefix =~ $PLAIN && $1 == "$prefix decide "* ]] || continue
+    args=${1#"$prefix decide "}
+    break
+  done
+  [[ -n $args && $args =~ $DECIDE_ARGS ]] || return 1
   args=${args#* }
   [[ ${args%% *} == "$session" ]]
+}
+
+patch_targets() { # patch_targets <patch text> -> "<changed lines> TAB <file>" for each file in a *** Begin Patch block
+  awk '
+    function flush() {
+      if (cur != "") {
+        printf "%d\t%s\n", count, cur
+        if (move != "") printf "%d\t%s\n", 0, move
+      }
+      cur = ""; move = ""; count = 0
+    }
+    { sub(/\r$/, "") }
+    /^\*\*\* Add File: / { flush(); cur = substr($0, 15); next }
+    /^\*\*\* Update File: / { flush(); cur = substr($0, 18); next }
+    /^\*\*\* Delete File: / { flush(); cur = substr($0, 18); next }
+    /^\*\*\* Move to: / { move = substr($0, 14); next }
+    /^\*\*\* End Patch/ { flush(); next }
+    cur != "" && (/^[+-]/) && !/^\+\+\+/ && !/^---/ { count++ }
+    END { flush() }
+  ' <<<"$1"
 }
 
 _flush() { # ends the word shell_tokens is building; it shares shell_tokens' locals through bash's dynamic scope
@@ -639,109 +718,518 @@ if [[ ${1:-} == report ]]; then
   exit 0
 fi
 
-[[ ${HIERARCHICAL_GATE:-on} == off ]] && exit 0
+case $HARNESS in
+  claude | agy | codex | gemini | cursor) PROTO=$HARNESS ;;
+  *) PROTO=generic ;;
+esac
 
-input=$(cat)
-IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // "", .hook_event_name // "PreToolUse", .tool_name // "", .session_id // "", .cwd // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
-[[ -z $agent ]] || exit 0
-cwd=${cwd:-$PWD}
+emit_pass() { # emit_pass [event_kind: pre|post|session]
+  local kind=${1:-pre}
+  case $PROTO in
+    claude | codex) ;;
+    agy)
+      if [[ $kind == pre ]]; then
+        printf '{"decision":"ask"}\n'
+      else
+        printf '{}\n'
+      fi
+      ;;
+    gemini | cursor) printf '{}\n' ;;
+    generic) printf '{"decision":"passthrough"}\n' ;;
+  esac
+}
 
-if [[ $event == SessionStart ]]; then
+emit_allow() { # emit_allow <reason>
+  case $PROTO in
+    claude | codex) jq -cn --arg r "$1" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:$r}}' ;;
+    agy | gemini) jq -cn --arg r "$1" '{decision:"allow",reason:$r}' ;;
+    cursor) printf '{"permission":"allow"}\n' ;;
+    generic) jq -cn --arg r "$1" '{decision:"allow",reason:$r}' ;;
+  esac
+}
+
+emit_deny() { # emit_deny <kind> <reason>
+  local k=$1 r=$2
+  if [[ $session =~ $SID ]]; then
+    mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null
+    printf '%s\t%s\tdeny\t%s\t\t%s\n' "$(date -u +%FT%TZ)" "$session" "$tool" "$k" >>"$DELEGATION_EVENTS" 2>/dev/null
+  fi
+  case $PROTO in
+    claude | codex) jq -cn --arg r "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' ;;
+    agy | gemini) jq -cn --arg r "$r" '{decision:"deny",reason:$r}' ;;
+    cursor) jq -cn --arg r "$r" '{permission:"deny",userMessage:$r,agentMessage:$r}' ;;
+    generic) jq -cn --arg k "$k" --arg r "$r" '{decision:"deny",kind:$k,reason:$r}' ;;
+  esac
+}
+
+emit_session_context() { # emit_session_context <text>
+  case $PROTO in
+    claude | codex | gemini) jq -cn --arg t "$1" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$t}}' ;;
+    agy) jq -cn --arg t "$1" '{injectSteps:[{systemMessage:{systemMessage:$t}}]}' ;;
+    cursor) jq -cn --arg t "$1" '{additional_context:$t}' ;;
+    generic) jq -cn --arg t "$1" '{decision:"passthrough",additionalContext:$t}' ;;
+  esac
+}
+
+handle_session_start() {
   # A session cannot see HI_FREE_WORKERS without running a command, so the skill's free-model rule
   # never fired; this note states it at every start, including after compaction.
-  [[ ${HI_FREE_WORKERS:-} == 1 && ${LANE_MODE:-} != driver ]] && command -v "${OPENCODE_BIN:-opencode}" >/dev/null 2>&1 || exit 0
-  jq -cn '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:"Free-model workers are on (HI_FREE_WORKERS=1, opencode installed). When the hierarchical-implementation skill delegates an editing unit, read its references/free-models.md and run free-models.sh for the unit before an Agent worker. The delegation gate refuses the plugin worker on sonnet until a free-model run under the unit name was tried."}}'
+  if [[ ${HI_FREE_WORKERS:-} == 1 && ${LANE_MODE:-} != driver ]] && command -v "${OPENCODE_BIN:-opencode}" >/dev/null 2>&1; then
+    emit_session_context "Free-model workers are on (HI_FREE_WORKERS=1, opencode installed). When the hierarchical-implementation skill delegates an editing unit, read its references/free-models.md and run free-models.sh for the unit before an Agent worker. The delegation gate refuses the plugin worker on sonnet until a free-model run under the unit name was tried."
+  else
+    emit_pass session
+  fi
   exit 0
-fi
+}
 
-if [[ $event == PostToolUse ]]; then
-  fields=""
-  case $tool in
-    Agent | Task) kind=spawn ;;
-    SendMessage) kind=message ;;
-    Bash) # a free-model worker counts like an Agent worker; continuing its session is a message
-      cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
-      [[ $cmd =~ $FREE_RUN ]] || exit 0
-      kind=spawn unit=${BASH_REMATCH[5]}
-      [[ -n ${BASH_REMATCH[7]} ]] && kind=message
-      case $unit in \"*\" | \'*\') unit=${unit:1:${#unit}-2} ;; esac # the shell drops quotes around the unit name, and free_first compares it with the worker's name
-      fields="$unit"$'\t'"${BASH_REMATCH[4]:-free}"$'\t'free-models
-      ;;
-    *) exit 0 ;;
-  esac
-  [[ $session =~ $SID ]] || exit 0
-  [[ -n $fields ]] || fields=$(jq -r '[.tool_input.name // .tool_input.to // "", ((.tool_response | objects | .resolvedModel) // .tool_input.model // ""), .tool_input.subagent_type // ""] | map(tostring | gsub("[\\t\\n\\r]"; " ")) | join("\t")' <<<"$input" 2>/dev/null) || exit 0
+log_event() { # log_event <kind> <target> <model> <type>
+  local k=$1 t=$2 m=$3 ty=$4
+  [[ $session =~ $SID ]] || return 0
+  t=${t//$'\t'/ }; t=${t//$'\n'/ }; t=${t//$'\r'/ }
+  m=${m//$'\t'/ }; m=${m//$'\n'/ }; m=${m//$'\r'/ }
+  ty=${ty//$'\t'/ }; ty=${ty//$'\n'/ }; ty=${ty//$'\r'/ }
   mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null
-  printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$kind" "$fields" >>"$DELEGATION_EVENTS" 2>/dev/null
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$k" "$t" "$m" "$ty" >>"$DELEGATION_EVENTS" 2>/dev/null
+}
+
+check_post_shell() { # check_post_shell <cmd>
+  local cmd=$1 k unit
+  [[ $cmd =~ $FREE_RUN ]] || return 0
+  k=spawn unit=${BASH_REMATCH[5]}
+  [[ -n ${BASH_REMATCH[7]} ]] && k=message
+  case $unit in \"*\" | \'*\') unit=${unit:1:${#unit}-2} ;; esac # the shell drops quotes around the unit name, and free_first compares it with the worker's name
+  log_event "$k" "$unit" "${BASH_REMATCH[4]:-free}" "free-models"
+}
+
+check_shell_cmd() { # check_shell_cmd <cmd> <allow_decide: 0|1> -> sets kind and reason, or emits allow and exits
+  local cmd=$1 allow_decide=$2 out count size target
+  if [[ $allow_decide == 1 ]] && own_decide "$cmd"; then
+    emit_allow "records a hierarchical-implementation decision"
+    exit 0
+  fi
+  if [[ $allow_decide == 1 && $cmd =~ $FREE_RUN && -z ${BASH_REMATCH[7]} ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+    kind=${out%%"$US"*} reason=${out#*"$US"}
+    return 0
+  fi
+  case $cmd in *'>'* | *tee* | *sed* | *perl*) ;; *) return 0 ;; esac # nothing else the tokenizer recognizes can write
+  count=0
+  while IFS=$'\t' read -r size target; do
+    [[ -n $target ]] || continue
+    count=$((count + 1))
+    if ((count > MAX_TARGETS)); then
+      kind=too-many-files reason="This command writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller commands."
+      break
+    fi
+    out=$(gate "$target" "$size")
+    [[ -z $out ]] || { kind=${out%%"$US"*} reason="This command writes $target, which the gate treats like an edit. ${out#*"$US"}"; break; }
+  done < <(shell_targets "$cmd")
+}
+
+check_patch_text() { # check_patch_text <patch> -> sets kind and reason
+  local size target out count=0
+  while IFS=$'\t' read -r size target; do
+    [[ -n $target ]] || continue
+    count=$((count + 1))
+    if ((count > MAX_TARGETS)); then
+      kind=too-many-files reason="This patch writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller patches."
+      break
+    fi
+    out=$(gate "$target" "$size")
+    [[ -z $out ]] || { kind=${out%%"$US"*} reason=${out#*"$US"}; break; }
+  done < <(patch_targets "$1")
+}
+
+# shellcheck disable=SC2016 # jq program variables are literal
+edit_delta_jq='
+  def delta($o; $n): ($o | split("\n")) as $a | ($n | split("\n")) as $b | ([$a, $b] | map(length) | min) as $m |
+    (first(range($m) | select($a[.] != $b[.])) // $m) as $p |
+    (first(range($m - $p) | select($a[-1 - .] != $b[-1 - .])) // ($m - $p)) as $s |
+    ($a | length) + ($b | length) - 2 * ($p + $s);
+  def str: if type == "string" then . else "" end;
+'
+
+check_edit_payload() { # check_edit_payload <file> <changed> <replace_all_old> -> sets kind and reason
+  local file=$1 changed=$2 old=${3:-} content rest hits out
+  [[ $changed =~ $NUM ]] || changed=0
+  if [[ -n $old ]] && resolve "$file" "$cwd"; then
+    content=$(cat "$path" 2>/dev/null)
+    rest=${content//"$old"/}
+    hits=$(((${#content} - ${#rest}) / ${#old}))
+    ((hits > 1)) && changed=$((changed * hits))
+  fi
+  out=$(gate "$file" "$changed")
+  [[ -z $out ]] || { kind=${out%%"$US"*} reason=${out#*"$US"}; }
+}
+
+agy_is_subagent() { # agy_is_subagent <parent_or_agent> <is_sub> <transcript_path>
+  [[ -n $1 || $2 == true || ${HIERARCHICAL_GATE_SUBAGENT:-0} == 1 ]] && return 0
+  if [[ -n $3 && -r $3 ]]; then
+    head -n 1 "$3" 2>/dev/null | jq -e 'objects | .source == "SYSTEM" and .type == "SYSTEM_MESSAGE" and ((.content // "") | tostring | contains("sender="))' >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+input=$(cat)
+if [[ ${HIERARCHICAL_GATE:-on} == off ]]; then
+  if [[ $PROTO == agy ]] && [[ $input == *'"PreToolUse"'* ]]; then
+    emit_pass pre
+  else
+    emit_pass post
+  fi
   exit 0
 fi
-
-root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || exit 0
 reason="" kind=""
-case $tool in
-  Edit | Write | MultiEdit | NotebookEdit)
-    file=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' <<<"$input" 2>/dev/null) || exit 0
-    # An edit's size is the lines it changes: old and new lose the lines they share at both ends,
-    # so context around a one-line fix does not count. Whole-file contents count whole.
-    changed=$(jq -r '
-      def delta($o; $n): ($o | split("\n")) as $a | ($n | split("\n")) as $b | ([$a, $b] | map(length) | min) as $m |
-        (first(range($m) | select($a[.] != $b[.])) // $m) as $p |
-        (first(range($m - $p) | select($a[-1 - .] != $b[-1 - .])) // ($m - $p)) as $s |
-        ($a | length) + ($b | length) - 2 * ($p + $s);
-      def str: if type == "string" then . else "" end;
-      [.tool_input | ((.content, .new_source) | select(type == "string") | split("\n") | length),
-        (select(.old_string != null or .new_string != null) | delta(.old_string | str; .new_string | str)),
-        (.edits[]? | delta(.old_string | str; .new_string | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
-    [[ $changed =~ $NUM ]] || changed=0
-    # replace_all changes every occurrence, so its size is one replacement times the occurrences
-    old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
-    if [[ -n $old ]] && resolve "$file" "$cwd"; then
-      content=$(cat "$path" 2>/dev/null)
-      rest=${content//"$old"/}
-      hits=$(((${#content} - ${#rest}) / ${#old}))
-      ((hits > 1)) && changed=$((changed * hits))
-    fi
-    out=$(gate "$file" "$changed")
-    [[ -z $out ]] || { kind=${out%%"$US"*} reason=${out#*"$US"}; }
-    ;;
-  Bash | Monitor)
-    cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
-    if [[ $tool == Bash ]] && own_decide "$cmd" && jq -e '.tool_input.dangerouslyDisableSandbox != true' <<<"$input" >/dev/null 2>&1; then
-      jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:"records a hierarchical-implementation decision"}}'
+
+case $PROTO in
+  claude)
+    IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // "", .hook_event_name // "PreToolUse", .tool_name // "", .session_id // "", .cwd // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
+    [[ -z $agent ]] || exit 0
+    cwd=${cwd:-$PWD}
+
+    [[ $event == SessionStart ]] && handle_session_start
+
+    if [[ $event == PostToolUse ]]; then
+      fields=""
+      case $tool in
+        Agent | Task) kind=spawn ;;
+        SendMessage) kind=message ;;
+        Bash) # a free-model worker counts like an Agent worker; continuing its session is a message
+          cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
+          check_post_shell "$cmd"
+          exit 0
+          ;;
+        *) exit 0 ;;
+      esac
+      [[ $session =~ $SID ]] || exit 0
+      fields=$(jq -r '[.tool_input.name // .tool_input.to // "", ((.tool_response | objects | .resolvedModel) // .tool_input.model // ""), .tool_input.subagent_type // ""] | map(tostring | gsub("[\\t\\n\\r]"; " ")) | join("\t")' <<<"$input" 2>/dev/null) || exit 0
+      mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null
+      printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$session" "$kind" "$fields" >>"$DELEGATION_EVENTS" 2>/dev/null
       exit 0
     fi
-    if [[ $tool == Bash && $cmd =~ $FREE_RUN && -z ${BASH_REMATCH[7]} ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
-      kind=${out%%"$US"*} reason=${out#*"$US"}
-    else
-      case $cmd in *'>'* | *tee* | *sed* | *perl*) ;; *) exit 0 ;; esac # nothing else the tokenizer recognizes can write
-      count=0
-      while IFS=$'\t' read -r size target; do
-        [[ -n $target ]] || continue
-        count=$((count + 1))
-        if ((count > MAX_TARGETS)); then
-          kind=too-many-files reason="This command writes more than $MAX_TARGETS files, more than the delegation gate checks in one command. Split it into smaller commands."
-          break
+
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || exit 0
+    case $tool in
+      Edit | Write | MultiEdit | NotebookEdit)
+        file=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' <<<"$input" 2>/dev/null) || exit 0
+        # An edit's size is the lines it changes: old and new lose the lines they share at both ends,
+        # so context around a one-line fix does not count. Whole-file contents count whole.
+        changed=$(jq -r "$edit_delta_jq"'
+          [.tool_input | ((.content, .new_source) | select(type == "string") | split("\n") | length),
+            (select(.old_string != null or .new_string != null) | delta(.old_string | str; .new_string | str)),
+            (.edits[]? | delta(.old_string | str; .new_string | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
+        old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
+        check_edit_payload "$file" "$changed" "$old"
+        ;;
+      Bash | Monitor)
+        cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || exit 0
+        allow_d=0
+        [[ $tool == Bash ]] && jq -e '.tool_input.dangerouslyDisableSandbox != true' <<<"$input" >/dev/null 2>&1 && allow_d=1
+        check_shell_cmd "$cmd" "$allow_d"
+        ;;
+      Agent | Task)
+        type=$(jq -r '.tool_input.subagent_type // "" | tostring | ascii_downcase | gsub("[\\s_-]"; "")' <<<"$input" 2>/dev/null)
+        if [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        elif ! subagent_model_forced && [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] &&
+          jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1; then
+          kind=model reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
+        elif [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first) && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
         fi
-        out=$(gate "$target" "$size")
-        [[ -z $out ]] || { kind=${out%%"$US"*} reason="This command writes $target, which the gate treats like an edit. ${out#*"$US"}"; break; }
-      done < <(shell_targets "$cmd")
+        ;;
+    esac
+    ;;
+
+  agy)
+    IFS=$US read -r agent is_sub transcript event tool session cwd < <(jq -r '[.parentConversationId // .agentId // "", (.isSubagent // false | tostring), .transcriptPath // "", .hookEventName // "PreToolUse", .toolCall.name // "", .conversationId // "", .cwd // (.workspacePaths[0]? // "")] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || { emit_pass pre; exit 0; }
+    agy_kind=pre
+    [[ $event == PostToolUse ]] && agy_kind=post
+    [[ $event == SessionStart ]] && agy_kind=session
+    agy_is_subagent "$agent" "$is_sub" "$transcript" && { emit_pass "$agy_kind"; exit 0; }
+    cwd=${cwd:-$PWD}
+
+    [[ $event == SessionStart ]] && handle_session_start
+
+    if [[ $event == PostToolUse ]]; then
+      case $tool in
+        invoke_subagent)
+          IFS=$US read -r wname wmodel wtype < <(jq -r '[.toolCall.args.Role // .toolCall.args.TypeName // "", .toolCall.args.Model // "", .toolCall.args.TypeName // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          log_event spawn "$wname" "$wmodel" "$wtype"
+          ;;
+        swarm)
+          IFS=$US read -r action wname wmodel < <(jq -r '[.toolCall.args.action // "", .toolCall.args.name // "", .toolCall.args.model // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          [[ $action == add ]] && log_event spawn "${wname:-swarm}" "$wmodel" "swarm"
+          ;;
+        send_message)
+          wname=$(jq -r '.toolCall.args.Recipient // ""' <<<"$input" 2>/dev/null) || wname=""
+          log_event message "$wname" "" ""
+          ;;
+        run_command)
+          cmd=$(jq -r '.toolCall.args.CommandLine // ""' <<<"$input" 2>/dev/null) || cmd=""
+          check_post_shell "$cmd"
+          ;;
+      esac
+      emit_pass post
+      exit 0
+    fi
+
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || { emit_pass pre; exit 0; }
+    case $tool in
+      edit_file | write_file)
+        file=$(jq -r '.toolCall.args.Path // .toolCall.args.path // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+        changed=$(jq -r "$edit_delta_jq"'
+          [.toolCall.args | ((.Content, .content) | select(type == "string") | split("\n") | length),
+            (select(.Target != null or .Replacement != null) | delta(.Target | str; .Replacement | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
+        check_edit_payload "$file" "$changed"
+        ;;
+      run_command)
+        cmd=$(jq -r '.toolCall.args.CommandLine // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+        check_shell_cmd "$cmd" 1
+        ;;
+      invoke_subagent)
+        IFS=$US read -r wname wmodel wtype < <(jq -r '[.toolCall.args.Role // "", .toolCall.args.Model // "", .toolCall.args.TypeName // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+        folded=$(printf '%s' "$wtype" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')
+        if [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        elif [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first "$wname" "$wmodel") && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        fi
+        ;;
+      swarm)
+        action=$(jq -r '.toolCall.args.action // ""' <<<"$input" 2>/dev/null) || action=""
+        if [[ $action == add ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        fi
+        ;;
+    esac
+    ;;
+
+  codex)
+    IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // "", .hook_event_name // "PreToolUse", .tool_name // "", .session_id // "", .cwd // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || exit 0
+    [[ -z $agent ]] || exit 0
+    cwd=${cwd:-$PWD}
+
+    [[ $event == SessionStart ]] && handle_session_start
+    [[ $event == UserPromptSubmit ]] && exit 0
+
+    if [[ $event == PostToolUse ]]; then
+      case $tool in
+        spawn_agent | Agent | Task)
+          IFS=$US read -r wname wmodel wtype < <(jq -r '[.tool_input.name // .tool_input.role // .tool_input.nickname // "worker", .tool_input.model // "", .tool_input.agent_type // .tool_input.subagent_type // "worker"] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          log_event spawn "$wname" "$wmodel" "$wtype"
+          ;;
+        send_input | SendMessage)
+          wname=$(jq -r '.tool_input.id // .tool_input.to // .tool_input.name // ""' <<<"$input" 2>/dev/null) || wname=""
+          log_event message "$wname" "" ""
+          ;;
+        Bash | shell_command | exec_command | shell)
+          cmd=$(jq -r '.tool_input.command // .tool_input.cmd // ""' <<<"$input" 2>/dev/null) || cmd=""
+          check_post_shell "$cmd"
+          ;;
+      esac
+      exit 0
+    fi
+
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || exit 0
+    case $tool in
+      apply_patch)
+        patch=$(jq -r 'if (.tool_input | type) == "string" then .tool_input else (.tool_input.command // .tool_input.input // .tool_input.patch // .tool_input.patchText // "") end' <<<"$input" 2>/dev/null) || exit 0
+        check_patch_text "$patch"
+        ;;
+      Edit | Write | MultiEdit | NotebookEdit | edit_file | write_file)
+        file=$(jq -r '.tool_input.file_path // .tool_input.path // .tool_input.notebook_path // ""' <<<"$input" 2>/dev/null) || exit 0
+        changed=$(jq -r "$edit_delta_jq"'
+          [.tool_input | ((.content, .new_source) | select(type == "string") | split("\n") | length),
+            (select(.old_string != null or .new_string != null) | delta(.old_string | str; .new_string | str)),
+            (.edits[]? | delta(.old_string | str; .new_string | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
+        old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
+        check_edit_payload "$file" "$changed" "$old"
+        ;;
+      Bash | shell_command | exec_command | shell)
+        cmd=$(jq -r '.tool_input.command // .tool_input.cmd // ""' <<<"$input" 2>/dev/null) || exit 0
+        check_shell_cmd "$cmd" 1
+        ;;
+      spawn_agent | Agent | Task)
+        IFS=$US read -r wname wmodel wtype < <(jq -r '[.tool_input.name // .tool_input.role // "", .tool_input.model // "", .tool_input.agent_type // .tool_input.subagent_type // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+        folded=$(printf '%s' "$wtype" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')
+        if [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        elif [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first "$wname" "$wmodel") && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        fi
+        ;;
+    esac
+    ;;
+
+  gemini)
+    IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // .subagent_id // "", .hook_event_name // "BeforeTool", .tool_name // "", .session_id // "", .cwd // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+    [[ -z $agent ]] || { emit_pass; exit 0; }
+    cwd=${cwd:-$PWD}
+
+    [[ $event == SessionStart ]] && handle_session_start
+
+    if [[ $event == AfterTool ]]; then
+      case $tool in
+        run_shell_command)
+          cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || cmd=""
+          check_post_shell "$cmd"
+          ;;
+        delegate_to_agent | subagent | invoke_subagent | Agent | Task)
+          IFS=$US read -r wname wmodel wtype < <(jq -r '[.tool_input.name // .tool_input.agent_name // "worker", .tool_input.model // "", .tool_input.agent_name // .tool_input.subagent_type // "worker"] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          log_event spawn "$wname" "$wmodel" "$wtype"
+          ;;
+      esac
+      emit_pass
+      exit 0
+    fi
+
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || { emit_pass; exit 0; }
+    case $tool in
+      write_file | replace)
+        file=$(jq -r '.tool_input.file_path // .tool_input.path // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+        changed=$(jq -r "$edit_delta_jq"'
+          [.tool_input | (.content | select(type == "string") | split("\n") | length),
+            (select(.old_string != null or .new_string != null) | delta(.old_string | str; .new_string | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
+        check_edit_payload "$file" "$changed"
+        ;;
+      run_shell_command)
+        cmd=$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+        check_shell_cmd "$cmd" 1
+        ;;
+      delegate_to_agent | subagent | invoke_subagent | Agent | Task)
+        IFS=$US read -r wname wmodel wtype < <(jq -r '[.tool_input.name // .tool_input.agent_name // "", .tool_input.model // "", .tool_input.agent_name // .tool_input.subagent_type // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+        folded=$(printf '%s' "$wtype" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')
+        if [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        elif [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first "$wname" "$wmodel") && [[ -n $out ]]; then
+          kind=${out%%"$US"*} reason=${out#*"$US"}
+        fi
+        ;;
+    esac
+    ;;
+
+  cursor)
+    IFS=$US read -r agent event tool session cwd < <(jq -r '[.agent_id // .subagent_id // "", .hook_event_name // .event // "preToolUse", .tool_name // "", .conversation_id // .session_id // "", .cwd // (.workspace_roots[0]? // "")] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+    [[ -z $agent ]] || { emit_pass; exit 0; }
+    cwd=${cwd:-$PWD}
+
+    [[ $event == sessionStart || $event == SessionStart ]] && handle_session_start
+
+    if [[ $event == postToolUse || $event == afterShellExecution || $event == PostToolUse ]]; then
+      case $event:$tool in
+        afterShellExecution:* | *:Shell | *:Bash | *:run_terminal_cmd)
+          cmd=$(jq -r '.command // .tool_input.command // ""' <<<"$input" 2>/dev/null) || cmd=""
+          check_post_shell "$cmd"
+          ;;
+        *:Task | *:Agent | *:subagent)
+          IFS=$US read -r wname wmodel wtype < <(jq -r '[.tool_input.name // .tool_input.description // "worker", .tool_input.model // "", .tool_input.subagent_type // "worker"] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          log_event spawn "$wname" "$wmodel" "$wtype"
+          ;;
+      esac
+      emit_pass
+      exit 0
+    fi
+
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || { emit_pass; exit 0; }
+    if [[ $event == beforeShellExecution ]]; then
+      tool=${tool:-Shell}
+      cmd=$(jq -r '.command // .tool_input.command // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+      check_shell_cmd "$cmd" 1
+    else
+      case $tool in
+        Edit | Write | StrReplace | MultiEdit | NotebookEdit | edit_file | write_file)
+          file=$(jq -r '.tool_input.file_path // .tool_input.path // .tool_input.target_file // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+          changed=$(jq -r "$edit_delta_jq"'
+            [.tool_input | ((.content, .contents, .new_source) | select(type == "string") | split("\n") | length),
+              (select(.old_string != null or .new_string != null) | delta(.old_string | str; .new_string | str)),
+              (.edits[]? | delta(.old_string | str; .new_string | str))] | add // 0' <<<"$input" 2>/dev/null) || changed=0
+          old=$(jq -j 'if .tool_input.replace_all == true then .tool_input.old_string // "" else "" end' <<<"$input" 2>/dev/null)
+          check_edit_payload "$file" "$changed" "$old"
+          ;;
+        Shell | Bash | run_terminal_cmd)
+          cmd=$(jq -r '.tool_input.command // .command // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+          check_shell_cmd "$cmd" 1
+          ;;
+        Task | Agent | subagent)
+          IFS=$US read -r wname wmodel wtype < <(jq -r '[.tool_input.name // "", .tool_input.model // "", .tool_input.subagent_type // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          folded=$(printf '%s' "$wtype" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')
+          if [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
+            kind=${out%%"$US"*} reason=${out#*"$US"}
+          elif [[ $folded =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first "$wname" "$wmodel") && [[ -n $out ]]; then
+            kind=${out%%"$US"*} reason=${out#*"$US"}
+          fi
+          ;;
+      esac
     fi
     ;;
-  Agent | Task)
-    type=$(jq -r '.tool_input.subagent_type // "" | tostring | ascii_downcase | gsub("[\\s_-]"; "")' <<<"$input" 2>/dev/null)
-    if [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(undecided_spawn) && [[ -n $out ]]; then
-      kind=${out%%"$US"*} reason=${out#*"$US"}
-    elif ! subagent_model_forced && [[ $session =~ $SID && -d $STATE_DIR/delegation/$session ]] &&
-      jq -e '(.tool_input.name // "") != "" and (.tool_input.model // "") == "" and .tool_input.subagent_type != "fork"' <<<"$input" >/dev/null 2>&1; then
-      kind=model reason="Set model on every named worker: the hierarchical-implementation skill passes the worker model explicitly (sonnet for editing workers unless the user chose another) instead of inheriting the main session's. Retry this call with model set."
-    elif [[ $type =~ ^($UNIT_WORKER_TYPES)$ ]] && out=$(free_first) && [[ -n $out ]]; then
-      kind=${out%%"$US"*} reason=${out#*"$US"}
+
+  generic)
+    IFS=$US read -r in_harness agent event action tool session cwd < <(jq -r '[.harness // "", .agent_id // "", .event // "pre_tool", .action // "", .tool // "", .session_id // "", .cwd // ""] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+    [[ -n $in_harness ]] && HARNESS=$in_harness
+    [[ -z $agent ]] || { emit_pass; exit 0; }
+    cwd=${cwd:-$PWD}
+
+    [[ $event == session_start ]] && handle_session_start
+
+    if [[ $event == post_tool ]]; then
+      case $action in
+        shell)
+          cmd=$(jq -r '.command // ""' <<<"$input" 2>/dev/null) || cmd=""
+          check_post_shell "$cmd"
+          ;;
+        spawn)
+          IFS=$US read -r wname wmodel wtype < <(jq -r '[.worker.name // "worker", .worker.model // "", .worker.type // "worker"] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+          log_event spawn "$wname" "$wmodel" "$wtype"
+          ;;
+        message)
+          wname=$(jq -r '.worker.name // ""' <<<"$input" 2>/dev/null) || wname=""
+          log_event message "$wname" "" ""
+          ;;
+      esac
+      emit_pass
+      exit 0
     fi
+
+    root=$(cd "${HIERARCHICAL_GATE_ROOT:-$HOME/vscode}" 2>/dev/null && pwd -P) || { emit_pass; exit 0; }
+    case $action in
+      edit)
+        count=0
+        while IFS=$US read -r fpath fchanged; do
+          [[ -n $fpath ]] || continue
+          count=$((count + 1))
+          if ((count > MAX_TARGETS)); then
+            kind=too-many-files reason="This edit writes more than $MAX_TARGETS files, more than the delegation gate checks in one call. Split it into smaller edits."
+            break
+          fi
+          check_edit_payload "$fpath" "$fchanged"
+          [[ -z $reason ]] || break
+        done < <(jq -r '(.files // [])[] | [(.path // ""), ((.changed // 0) | tostring)] | join("\u001f")' <<<"$input" 2>/dev/null)
+        ;;
+      patch)
+        patch=$(jq -r '.patch // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+        check_patch_text "$patch"
+        ;;
+      shell)
+        cmd=$(jq -r '.command // ""' <<<"$input" 2>/dev/null) || { emit_pass; exit 0; }
+        check_shell_cmd "$cmd" 1
+        ;;
+      spawn)
+        IFS=$US read -r wname wmodel wtype wunit < <(jq -r '[.worker.name // "", .worker.model // "", .worker.type // "", (.worker.unit // false | tostring)] | map(tostring) | join("\u001f")' <<<"$input" 2>/dev/null) || true
+        folded=$(printf '%s' "$wtype" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')
+        if [[ $wunit == true || $folded =~ ^($UNIT_WORKER_TYPES)$ ]]; then
+          if out=$(undecided_spawn) && [[ -n $out ]]; then
+            kind=${out%%"$US"*} reason=${out#*"$US"}
+          elif out=$(free_first "$wname" "$wmodel") && [[ -n $out ]]; then
+            kind=${out%%"$US"*} reason=${out#*"$US"}
+          fi
+        fi
+        ;;
+    esac
     ;;
 esac
-[[ -n $reason ]] || exit 0
-if [[ $session =~ $SID ]]; then
-  mkdir -p "$(dirname "$DELEGATION_EVENTS")" 2>/dev/null
-  printf '%s\t%s\tdeny\t%s\t\t%s\n' "$(date -u +%FT%TZ)" "$session" "$tool" "$kind" >>"$DELEGATION_EVENTS" 2>/dev/null
+
+if [[ -n $reason ]]; then
+  emit_deny "$kind" "$reason"
+else
+  emit_pass
 fi
-jq -cn --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'

@@ -1,0 +1,25 @@
+{
+  "name": "hierarchical-implementation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Make worker subagents the default for implementation across Claude Code, OpenCode, Antigravity CLI (agy), OMP, Codex, Gemini CLI, Cursor and Pi.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mateo-di/hierarchical-implementation"
+  },
+  "omp": {
+    "extensions": [
+      "./adapters/omp-pi/index.ts"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./adapters/omp-pi/index.ts"
+    ],
+    "skills": [
+      "./skills/hierarchical-implementation"
+    ]
+  }
+}

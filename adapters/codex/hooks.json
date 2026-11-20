@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write|MultiEdit|NotebookEdit|edit_file|write_file|Bash|shell_command|exec_command|shell|spawn_agent|Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "spawn_agent|send_input|Agent|Task|SendMessage|Bash|shell_command|exec_command|shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

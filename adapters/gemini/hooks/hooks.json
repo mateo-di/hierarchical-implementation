@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "hierarchical-implementation-gate-session",
+            "type": "command",
+            "command": "bash \"${extensionPath}/gate.sh\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "write_file|replace|run_shell_command|delegate_to_agent|subagent|invoke_subagent|Agent|Task",
+        "hooks": [
+          {
+            "name": "hierarchical-implementation-gate-before",
+            "type": "command",
+            "command": "bash \"${extensionPath}/gate.sh\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "run_shell_command|delegate_to_agent|subagent|invoke_subagent|Agent|Task",
+        "hooks": [
+          {
+            "name": "hierarchical-implementation-gate-after",
+            "type": "command",
+            "command": "bash \"${extensionPath}/gate.sh\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

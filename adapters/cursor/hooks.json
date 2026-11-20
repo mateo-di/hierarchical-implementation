@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness cursor"
+      }
+    ],
+    "preToolUse": [
+      {
+        "matcher": "Edit|Write|StrReplace|MultiEdit|NotebookEdit|edit_file|write_file|Shell|Bash|run_terminal_cmd|Task|Agent|subagent",
+        "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness cursor"
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness cursor"
+      }
+    ],
+    "postToolUse": [
+      {
+        "matcher": "Shell|Bash|run_terminal_cmd|Task|Agent|subagent",
+        "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness cursor"
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "bash \"${HIERARCHICAL_IMPLEMENTATION_ROOT:-$HOME/vscode/hierarchical-implementation}/hooks/hierarchical-implementation-gate.sh\" --harness cursor"
+      }
+    ]
+  }
+}
