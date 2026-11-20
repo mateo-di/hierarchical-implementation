@@ -30,7 +30,7 @@ The settings file is `$CLAUDE_CONFIG_DIR/settings.json` when that variable is se
    [ -s "$f" ] || (umask 077 && mkdir -p "$(dirname "$f")" && echo '{}' > "$f")
    t=$(mktemp) && jq --arg m "$m" '.env.CLAUDE_CODE_SUBAGENT_MODEL = $m | .env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = "1"' "$f" > "$t" && [ -s "$t" ] && cat "$t" > "$f"; rm -f "$t"
    ```
-   The copy goes back only when `jq` succeeded, `mktemp` makes it readable only by the user, and `cat` writes over the settings file's contents, so a symlinked file stays linked. Done when step 1's commands show both new values.
+   Run the block as one command: its `&&` chain is what keeps a failed `jq` from reaching the file. When your rules make you split it, run the `cat` only after `jq` exited 0 and the temp file is non-empty, and remove the temp file either way. The copy goes back only when `jq` succeeded, `mktemp` makes it readable only by the user, and `cat` writes over the settings file's contents, so a symlinked file stays linked. Done when step 1's commands show both new values.
 5. **Report.** Tell the user:
    - the keys apply to sessions started from now on;
    - to give one session's subagents another model, start it with `claude --settings '{"env":{"CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"0"}}'` and name the model on the Agent call;
