@@ -124,9 +124,29 @@ out=$(HI_FREE_WORKERS=1 OPENCODE_BIN="$FAKE_BIN/opencode" bash "$HOOK" --harness
 assert_contains "agy: SessionStart injects free-model note" "$(jq -r '.injectSteps[0].systemMessage.systemMessage' <<<"$out")" "HI_FREE_WORKERS=1"
 assert_eq "agy: SessionStart without HI_FREE_WORKERS returns {}" "$(agy_run "$agy_ss")" "{}"
 
-# AGY wrapper script works end-to-end
+# AGY wrapper script works end-to-end (in-tree and copied to an external install dir)
 out=$(bash "$ROOT/adapters/agy/gate.sh" <<<"$agy_edit")
 assert_eq "agy: adapters/agy/gate.sh wrapper passes allowed edit" "$out" '{"decision":"ask"}'
+
+ext_agy="$T/ext-agy-plugin"
+mkdir -p "$ext_agy" "$T/fakehome/vscode"
+cp "$ROOT/adapters/agy/gate.sh" "$ext_agy/gate.sh"
+ln -s "$ROOT" "$T/fakehome/vscode/hierarchical-implementation"
+out=$(HOME="$T/fakehome" HIERARCHICAL_IMPLEMENTATION_ROOT="" bash "$ext_agy/gate.sh" <<<"$agy_edit")
+assert_eq "agy: copied gate.sh falls back to HOME/vscode/hierarchical-implementation" "$out" '{"decision":"ask"}'
+agy_undecided=$(jq -cn --arg p "$W/src/a.ts" --arg c "$W" '{
+  hookEventName:"PreToolUse",
+  conversationId:"agy-copied-1",
+  cwd:$c,
+  toolCall:{id:"tc9",name:"edit_file",args:{Path:$p,Target:"one",Replacement:"uno"}}
+}')
+out=$(HOME="$T/fakehome" HIERARCHICAL_IMPLEMENTATION_ROOT="" bash "$ext_agy/gate.sh" <<<"$agy_undecided")
+assert_eq "agy: copied gate.sh enforces deny via HOME fallback" "$(jq -r '.decision' <<<"$out")" "deny"
+if find "$ROOT/adapters/agy" -type l | grep -q .; then
+  fail "agy: adapters/agy contains symlinks (breaks agy plugin install)"
+else
+  pass "agy: adapters/agy has no symlinks (safe for agy plugin install)"
+fi
 
 # --- CODEX ---
 codex_run() { bash "$HOOK" --harness codex <<<"$1"; }
