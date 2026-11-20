@@ -1,0 +1,22 @@
+{
+  "name": "hierarchical-implementation",
+  "owner": {
+    "name": "mateo-di"
+  },
+  "metadata": {
+    "description": "Worker-subagent-by-default implementation skill and delegation gate for OMP and Pi.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "hierarchical-implementation",
+      "description": "Make worker subagents the default for implementation: the main session briefs, reviews critically, sends corrections and integrates, and a hook holds every direct-work exemption to its scope.",
+      "source": "./",
+      "version": "1.0.0",
+      "category": "productivity",
+      "homepage": "https://github.com/mateo-di/hierarchical-implementation",
+      "repository": "https://github.com/mateo-di/hierarchical-implementation",
+      "license": "MIT"
+    }
+  ]
+}

@@ -123,12 +123,29 @@ Agent worker with that model; a model only `opencode models` lists runs through 
 `--model` path, with no rotation and no fallback; for neither, tell the user it is unavailable
 and ask. Never substitute another model.
 
+## Harness tool mapping
+
+The procedure above is written in Claude Code's tool names. On other CLIs, use the matching
+native tool (or `free-models.sh` when `HI_FREE_WORKERS=1`, or record `no-subagents` when the
+harness has no subagent tool):
+
+| CLI | Spawn worker | Send correction | Worker agent |
+|---|---|---|---|
+| Claude Code | `Agent` | `SendMessage` | `hierarchical-implementation:worker` (or `general-purpose`) |
+| OpenCode | `subagent` | `subagent` with `sessionID` | `general` (or a repo worker agent) |
+| Antigravity (`agy`) | `invoke_subagent` (or `swarm`) | `send_message` | `worker` (from `adapters/agy/agents/worker.md`) |
+| OMP (`oh-my-pi`) | `task` | follow-up `task` | `worker` (or `task`) |
+| Codex CLI | `spawn_agent` | `send_input` | `worker` / default coding subagent |
+| Cursor | `Task` / `Agent` | follow-up on the same worker | default subagent |
+| Gemini CLI / Pi | subagent tool if enabled, else `free-models.sh` or `no-subagents` | session follow-up | — |
+
 ## The gate
 
-The `hierarchical-implementation-gate.sh` hook denies the main thread's first edit in a `~/vscode`
-worktree, and its first worker (the plugin's agent or a free-model run) while it works in one,
-until the session records a decision with the `decide` command its message prints. The hook
-approves that command itself, then holds each decision to its scope. It also requires `model`
-on named worker calls, and logs decisions, spawns, messages and denials, which its `report`
-command summarizes. It cannot classify work or judge whether a review was critical. This skill
-and project rules do not override user instructions or the harness.
+The `hierarchical-implementation-gate.sh` hook (and its CLI adapters under `adapters/`) denies the
+main thread's first edit in a `~/vscode` worktree, and its first worker (the plugin's agent or a
+free-model run) while it works in one, until the session records a decision with the `decide`
+command its message prints. The hook approves that command itself where the harness supports hook
+approvals, then holds each decision to its scope. On Claude Code it also requires `model` on named
+worker calls, and across all harnesses it logs decisions, spawns, messages and denials, which its
+`report` command summarizes. It cannot classify work or judge whether a review was critical. This
+skill and project rules do not override user instructions or the harness.

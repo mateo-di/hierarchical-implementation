@@ -1,8 +1,10 @@
 # hierarchical-implementation
 
-A Claude Code plugin that makes worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result critically, sends corrections to the same worker, and integrates. A hook holds the driver to that: it must decide before its first edit or first worker, and each decision only allows what it claims.
+A multi-CLI plugin and delegation gate (originally built for Claude Code, with native adapters for OpenCode, Antigravity CLI `agy`, OMP `oh-my-pi`, Codex CLI, Gemini CLI, Cursor and Pi) that makes worker subagents the default for implementation. The main session acts as a driver. It plans, briefs one named worker per unit, reviews each result critically, sends corrections to the same worker, and integrates. One shared gate engine (`hooks/hierarchical-implementation-gate.sh`) holds the driver to that across every CLI: it must decide before its first edit or first worker, and each decision only allows what it claims.
 
 ## Install
+
+### Claude Code
 
 ```bash
 claude plugin marketplace add mateo-di/hierarchical-implementation
@@ -12,6 +14,23 @@ claude plugin install hierarchical-implementation@hierarchical-implementation
 Then merge [examples/CLAUDE.md](examples/CLAUDE.md) into `~/.claude/CLAUDE.md`. It holds the policy row the skill and the hook refer to, including the standing authorization for editing workers. Hooks load when a session starts, so restart open sessions.
 
 Requirements: Claude Code with the Agent and SendMessage tools, `bash` 3.2 or newer, `git`, `jq`.
+
+### Other CLIs
+
+Clone this repository (for example to `~/vscode/hierarchical-implementation`), merge [examples/AGENTS.md](examples/AGENTS.md) into your CLI's global instructions file, and wire up the adapter for each CLI you use. All adapters call the same `hooks/hierarchical-implementation-gate.sh` core so decisions, line caps, `security` paths and `report` logs stay identical across tools.
+
+| CLI | Adapter | Subagent bypass | Install |
+|---|---|---|---|
+| **Claude Code** | `.claude-plugin/` + `hooks/hooks.json` | `agent_id` | `claude plugin marketplace add` / `install` above |
+| **OpenCode** (v2) | `adapters/opencode/` (`@opencode/plugin`) | `session.parentID` | Add `"file:///path/to/hierarchical-implementation/adapters/opencode"` to `plugins` in `~/.config/opencode/opencode.json` and symlink `skills/hierarchical-implementation` into `~/.config/opencode/skills/hierarchical-implementation` |
+| **Antigravity CLI (`agy`)** | `adapters/agy/` (`plugin.json` + `hooks.json` + `agents/worker.md`) | `parentConversationId`, `isSubagent`, or subagent `transcriptPath` | `agy plugin install /path/to/hierarchical-implementation/adapters/agy` (or symlink into `~/.gemini/config/plugins/hierarchical-implementation`, setting `HIERARCHICAL_IMPLEMENTATION_ROOT` if copied outside the repo) |
+| **OMP (`oh-my-pi`)** | `.omp-plugin/marketplace.json` + `package.json` (`omp.extensions`) + `adapters/omp-pi/` | `ctx.agent.kind !== "main"` | Install from the marketplace (`/marketplace add mateo-di/hierarchical-implementation`, `/marketplace install hierarchical-implementation@hierarchical-implementation`) or pass `-e /path/to/hierarchical-implementation/adapters/omp-pi/index.ts` (and symlink `skills/hierarchical-implementation` into `~/.omp/agent/skills/`) |
+| **Pi (`pi`)** | `package.json` (`pi.extensions`, `pi.skills`) + `adapters/omp-pi/` | `ctx.agent.kind !== "main"` | `pi install /path/to/hierarchical-implementation` or `pi -e /path/to/hierarchical-implementation/adapters/omp-pi/index.ts --skill /path/to/hierarchical-implementation/skills/hierarchical-implementation` |
+| **Codex CLI** | `.codex-plugin/plugin.json` + `adapters/codex/hooks.json` | `agent_id` | Merge `adapters/codex/hooks.json` into `~/.codex/hooks.json` (set `HIERARCHICAL_IMPLEMENTATION_ROOT` if cloned elsewhere) and symlink `skills/hierarchical-implementation` into `~/.codex/skills/hierarchical-implementation` |
+| **Gemini CLI** | `adapters/gemini/` (`gemini-extension.json` + `hooks/hooks.json`) | `agent_id` / `subagent_id` | `gemini extensions link /path/to/hierarchical-implementation/adapters/gemini` (and symlink `skills/hierarchical-implementation` into `~/.gemini/skills/hierarchical-implementation`) |
+| **Cursor** | `.cursor-plugin/plugin.json` + `adapters/cursor/hooks.json` | `agent_id` / `subagent_id` | Merge `adapters/cursor/hooks.json` into `~/.cursor/hooks.json` (set `HIERARCHICAL_IMPLEMENTATION_ROOT` if cloned elsewhere) |
+
+Requirements for all CLIs: `bash` 3.2 or newer, `git`, `jq` (plus Node.js 22+ or Bun for the OpenCode and OMP/Pi TypeScript adapters).
 
 ### Upgrading from a manual install
 
@@ -73,6 +92,8 @@ The script lives in the plugin's `hooks/` directory under `~/.claude/plugins/cac
 |---|---|---|
 | `HIERARCHICAL_GATE_ROOT` | `~/vscode` | Only paths under this directory are gated |
 | `HIERARCHICAL_GATE` | `on` | `off` disables the hook |
+| `HIERARCHICAL_GATE_HARNESS` | `claude` | Hook wire protocol (`claude`, `agy`, `codex`, `gemini`, `cursor`, `opencode`, `omp`, `pi`, `generic`); also selectable via `--harness <name>` |
+| `HIERARCHICAL_IMPLEMENTATION_ROOT` | repo checkout | Path to this repo used by `adapters/agy/gate.sh`, `adapters/gemini/gate.sh`, `adapters/codex/hooks.json` and `adapters/cursor/hooks.json` when installed outside the checkout |
 | `TRIVIAL_MAX_LINES` | `60` | Changed-line cap for a trivial exemption, per worktree and session |
 | `TRIVIAL_MAX_FILES` | `3` | Files a trivial exemption covers |
 | `INTEGRATE_MAX_LINES` | `60` | Driver's changed-line budget per worktree under delegate |
@@ -113,7 +134,9 @@ Free models come and go, and some providers keep or train on prompts. Check each
 
 ```bash
 bash hooks/hierarchical-implementation-gate.test.sh
-bash skills/hierarchical-implementation/scripts/free-models.test.sh
+bash hooks/multi-cli-gate.test.sh
+node --test adapters/opencode/gate-client.test.ts adapters/omp-pi/gate-client.test.ts
+bash "$PWD/skills/hierarchical-implementation/scripts/free-models.test.sh"
 ```
 
 ## What it does not enforce

@@ -1,0 +1,35 @@
+{
+  "hierarchical-implementation-gate": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "bash \"${PLUGIN_ROOT:-.}/gate.sh\"",
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "edit_file|write_file|run_command|invoke_subagent|swarm",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT:-.}/gate.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "invoke_subagent|send_message|swarm|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT:-.}/gate.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
