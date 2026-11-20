@@ -33,8 +33,20 @@ not, because a free-model run is another session. A free model is never a blocke
   once a day: ids ending in `-free` or `:free`, and OpenRouter ones only when they support tools,
   and again when opencode refuses a model as unavailable.
 
+## agy models
+
+With the Antigravity CLI installed, a model id `agy/<id>`, with `<id>` from `agy models`, runs as
+a headless `agy -p` on the user's agy quota rather than a free tier. The rotation tries one only
+when `HI_FREE_MODELS_PREFER` names it, such as `agy/gemini-3.8-flash-medium` before the opencode
+ids. agy runs with the user's own agy permission settings, not a restricted agent: in Auto mode,
+its default for headless runs, it approves the commands it judges safe. So the brief's limits (the
+files it owns, no commit) are instructions there, and any check command works. Review its diff and
+`git status` as for any worker. The session it prints is the agy conversation id, which a
+correction passes the same way.
+
 ## A model the user names
 
-A model that `opencode models` lists, but that is not an Agent tool alias, runs with
+A model that `opencode models` lists, or one `agy models` lists written as `agy/<id>`, but that is
+not an Agent tool alias, runs with
 `free-models.sh run --model <provider/model> <worktree> <name> <brief-file>`. It runs only that
 model, with no rotation, no cooldown and no fallback.
