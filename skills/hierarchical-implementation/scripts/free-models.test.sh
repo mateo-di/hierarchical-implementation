@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regression suite for free-models.sh: runs it against a stub opencode that fails the models named
 # in STUB_FAIL, hangs silently on the ones in STUB_STALL, refuses the ones in STUB_GONE as
-# unavailable, and knows no agent named in STUB_NO_AGENT, and a stub agy for agy/<model> ids.
+# unavailable, and knows no agent named in STUB_NO_AGENT. A stub agy serves agy/<model> ids and
+# logs model|conversation|cwd|message|brief|args|attached path, one line per call.
 # Checks rotation, stalls, cooldown, fallback, sessions, refresh and the registry's integrity.
 #   bash skills/hierarchical-implementation/scripts/free-models.test.sh
 set -u
@@ -75,8 +76,13 @@ while (($#)); do
 done
 conv=${conv:-conv_stub$$}
 brief=$(cat "${msg##*@}")
-printf '%s|%s|%s|%s|%s|%s\n' "$model" "$conv" "$PWD" "${msg% @*}" "${brief//$'\n'/ }" "$args" >>"$STUB_AGY_LOG"
+printf '%s|%s|%s|%s|%s|%s|%s\n' "$model" "$conv" "$PWD" "${msg% @*}" "${brief//$'\n'/ }" "$args" "${msg##*@}" >>"$STUB_AGY_LOG"
 printf '{"event":"init","conversation_id":"%s","init":{"model":"%s"}}\n{"event":"step_update","step_update":{}}\n' "$conv" "$model"
+[[ " ${STUB_CRASH:-} " == *" agy/$model "* ]] && exit 7 # dies before its result
+if [[ " ${STUB_BARE:-} " == *" agy/$model "* ]]; then # a result with no status
+  printf '{"event":"result","result":{"conversation_id":"%s"}}\n' "$conv"
+  exit 0
+fi
 if [[ " ${STUB_FAIL:-} " == *" agy/$model "* ]]; then
   printf '{"event":"result","result":{"conversation_id":"%s","status":"ERROR","response":"","error":"quota exhausted","finished_reason":"error"}}\n' "$conv"
   exit 3
@@ -220,11 +226,23 @@ out=$(fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md")
 expect "an agy model runs through agy in the worktree" "$(cut -d'|' -f1,3,4 "$STUB_AGY_LOG")" "m1|$T/wt|Execute the unit in the attached brief."
 expect "agy gets the brief attached" "$(cut -d'|' -f5 "$STUB_AGY_LOG")" "do the unit"
 expect "agy runs on the user's own permission settings" "$(grep -c -e '--dangerously-skip-permissions' -e '--settings' "$STUB_AGY_LOG")" "0"
-expect "agy reports its conversation as the session" "$(head -n 1 <<<"$out")" "model=agy/m1 session=$(cut -d'|' -f2 "$STUB_AGY_LOG")"
+expect "agy reports its conversation, marked agy:, as the session" "$(head -n 1 <<<"$out")" "model=agy/m1 session=agy:$(cut -d'|' -f2 "$STUB_AGY_LOG")"
 expect "agy's reply is its result's response" "$(tail -n 1 <<<"$out")" "done by agy/m1"
 : >"$STUB_AGY_LOG"
-out=$(fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" conv_old)
-expect "an agy correction continues its conversation" "$(cut -d'|' -f2 "$STUB_AGY_LOG"):$(head -n 1 <<<"$out" | cut -d' ' -f2)" "conv_old:session=conv_old"
+out=$(fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" agy:conv_old)
+expect "an agy correction continues its conversation" "$(cut -d'|' -f2 "$STUB_AGY_LOG"):$(head -n 1 <<<"$out" | cut -d' ' -f2)" "conv_old:session=agy:conv_old"
+: >"$STUB_AGY_LOG"
+mkdir -p "$T/a dir@x"
+printf 'spaced brief\n' >"$T/a dir@x/brief.md"
+fm run --model agy/m1 "$T/wt" ua1 "$T/a dir@x/brief.md" >/dev/null
+expect "a brief path with a space or @ reaches agy as a plain path" "$(cut -d'|' -f7 "$STUB_AGY_LOG" | grep -c '^/tmp/free-models-brief\.[A-Za-z0-9]*$'):$(cut -d'|' -f5 "$STUB_AGY_LOG")" "1:spaced brief"
+expect "the brief copy is removed after the run" "$(find /tmp -maxdepth 1 -name "$(basename "$(cut -d'|' -f7 "$STUB_AGY_LOG")")" | grep -c .)" "0"
+fm run --model agy/ "$T/wt" ua1 "$T/brief.md" >/dev/null 2>&1
+expect "an agy model with no id is a wrong call" "$?" "1"
+STUB_BARE="agy/m1" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>"$T/err"
+grep -q 'agy/m1 failed: no status' "$T/err" && pass "a result with no status is a failure that says so" || fail "stderr: $(cat "$T/err")"
+STUB_CRASH="agy/m1" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>"$T/err"
+grep -q 'agy/m1 failed: agy exited 7' "$T/err" && pass "an agy crash names agy" || fail "stderr: $(cat "$T/err")"
 OPENCODE_BIN="$T/missing" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>&1
 expect "an explicit agy model needs no opencode" "$?" "0"
 AGY_BIN="$T/missing" fm run --model agy/m1 "$T/wt" ua1 "$T/brief.md" >/dev/null 2>"$T/err"
@@ -241,7 +259,15 @@ grep -q 'agy/m1 failed: print_timeout' "$T/err" && pass "the reason the turn end
 STUB_FAIL="agy/m1" HI_FREE_MODELS_PREFER="agy/m1 opencode/a-free" fm run "$T/wt" ua2 "$T/brief.md" >/dev/null 2>&1
 expect "a preferred agy model is tried first, then the rotation" "$(cut -d'|' -f1 "$STUB_AGY_LOG") $(calls)" "m1 opencode/a-free "
 expect "a failed agy model cools down" "$(fm list | grep agy/m1 | cut -f2)" "cooling down"
+fm refresh
+expect "a refresh keeps an agy model's cooldown" "$(fm list | grep agy/m1 | cut -f2)" "cooling down"
 cool
+: >"$STUB_LOG" && : >"$STUB_AGY_LOG"
+HI_FREE_MODELS_PREFER="agy/m1 opencode/a-free" fm run "$T/wt" ua5 "$T/brief.md" ses_x >/dev/null 2>&1
+expect "an opencode session is not sent to agy" "$(grep -c . "$STUB_AGY_LOG"):$(cut -d'|' -f1,2 "$STUB_LOG")" "0:opencode/a-free|ses_x"
+: >"$STUB_LOG"
+HI_FREE_MODELS_PREFER="agy/m1 opencode/a-free" fm run "$T/wt" ua6 "$T/brief.md" agy:c1 >/dev/null 2>&1
+expect "an agy session is not sent to opencode" "$(cut -d'|' -f1,2 "$STUB_AGY_LOG"):$(grep -c . "$STUB_LOG")" "m1|c1:0"
 : >"$STUB_LOG" && : >"$STUB_AGY_LOG"
 fm run "$T/wt" ua3 "$T/brief.md" >/dev/null 2>&1
 expect "an agy model the registry holds but no one prefers is not tried" "$(grep -c . "$STUB_AGY_LOG"):$(calls)" "0:opencode/a-free "

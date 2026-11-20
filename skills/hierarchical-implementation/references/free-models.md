@@ -36,13 +36,16 @@ not, because a free-model run is another session. A free model is never a blocke
 ## agy models
 
 With the Antigravity CLI installed, a model id `agy/<id>`, with `<id>` from `agy models`, runs as
-a headless `agy -p` on the user's agy quota rather than a free tier. The rotation tries one only
-when `HI_FREE_MODELS_PREFER` names it, such as `agy/gemini-3.8-flash-medium` before the opencode
-ids. agy runs with the user's own agy permission settings, not a restricted agent: in Auto mode,
-its default for headless runs, it approves the commands it judges safe. So the brief's limits (the
-files it owns, no commit) are instructions there, and any check command works. Review its diff and
-`git status` as for any worker. The session it prints is the agy conversation id, which a
-correction passes the same way.
+a headless `agy -p` on the user's agy quota rather than a free tier; agy's list includes Claude
+models, which spend that quota too. The rotation above tries one only when
+`HI_FREE_MODELS_PREFER` names it, such as `agy/<id>` before the opencode ids; `--model agy/<id>`
+needs agy but not opencode. agy runs with the user's own agy permission settings, not the
+restricted opencode agent: in Auto mode, its default for headless runs, it approves the commands it
+judges safe. So the brief's limits (the files it owns, no commit) are instructions there, and the
+check list above, which is that agent's, does not apply. Review its diff and `git status` as for
+any worker. The brief and the files it reads go to the agy model's provider, and agy keeps each
+conversation in its own local store. The session an agy run prints starts with `agy:`, and a
+correction with it runs only on agy models.
 
 ## A model the user names
 
