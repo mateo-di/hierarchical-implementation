@@ -15,6 +15,31 @@ Then merge [examples/CLAUDE.md](examples/CLAUDE.md) into `~/.claude/CLAUDE.md`. 
 
 Requirements: Claude Code with the Agent and SendMessage tools, `bash` 3.2 or newer, `git`, `jq`.
 
+### Run every subagent on one model (recommended)
+
+The plugin's workers are meant to run a cheaper model than the driver. The skill suggests Sonnet workers under an Opus driver.
+
+`CLAUDE_CODE_SUBAGENT_MODEL` alone is only a default: an Agent call's `model` parameter, an agent definition's `model` field, and the built-in Explore and Plan agents win over it.
+
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (Claude Code v2.1.257 or later) makes it binding for every subagent, teammate and workflow agent. The Agent tool then takes no `model`; forks and skills with `model: inherit` keep the session's model. See the [Claude Code docs](https://code.claude.com/docs/en/sub-agents.md#run-every-subagent-on-one-model).
+
+A plugin cannot set these for you, so run `/hierarchical-implementation:setup`, optionally with a model, for example `/hierarchical-implementation:setup claude-sonnet-5-5`. It shows the current values, proposes `sonnet`, shows the change and writes the two keys to your user settings only after you say yes.
+
+Or add them yourself to the `env` block of `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1"
+  }
+}
+```
+
+To give one session's subagents another model, start it with `claude --settings '{"env":{"CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"0"}}'`.
+
+The keys apply to sessions started after the change.
+
 ### Other CLIs
 
 Clone this repository (for example to `~/vscode/hierarchical-implementation`), merge [examples/AGENTS.md](examples/AGENTS.md) into your CLI's global instructions file, and wire up the adapter for each CLI you use. All adapters call the same `hooks/hierarchical-implementation-gate.sh` core so decisions, line caps, `security` paths and `report` logs stay identical across tools.
@@ -71,7 +96,7 @@ There are three layers.
   - `lane`: the whole worktree, only in a session started with `LANE_MODE=unit`, which a lane spawner such as `herdr-spawn --lane unit` exports. The session records `lane` itself: the variable outlives the lane in its pane's shell, so the gate does not exempt a later session there without a decision.
   - `opt-out`, `no-subagents`: the whole worktree.
 - **Shell writes.** In `Bash` and `Monitor` commands, a quote-aware tokenizer finds files written through redirects (`>`, `>>`, `>|`, `&>`, `>&`), `tee`, `sed -i` and `perl -i`. Those files go through the same rules as edits. A heredoc body counts toward the size of the file it writes.
-- **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root. With `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on, the Agent tool takes no model, so the check is skipped.
+- **Named worker calls** (`Agent` with `name`) must set `model`. This applies only in sessions that have touched the gate root. With `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on, the Agent tool takes no model, so the check is skipped. See [Run every subagent on one model](#run-every-subagent-on-one-model-recommended).
 - **Free model first.** With `HI_FREE_WORKERS=1` and opencode installed, the plugin's worker on sonnet is denied until the session logged a `free-models.sh run` under its name, or under its name's prefix before a dash (a redo or a best-of-N attempt). Driver lanes and workers on another model are not asked. At session start the hook adds a note that free-model workers are on, since a session cannot see the variable otherwise.
 - **Logging.** Worker spawns, `SendMessage` calls, `free-models.sh run` commands and denials are logged.
 
