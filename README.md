@@ -19,7 +19,7 @@ The plugin's workers are meant to run a cheaper model than the driver. The skill
 
 `CLAUDE_CODE_SUBAGENT_MODEL` alone is only a default: an Agent call's `model` parameter, an agent definition's `model` field, and the built-in Explore and Plan agents win over it.
 
-`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes it binding for every subagent, teammate and workflow agent. The Agent tool then takes no `model`; forks and skills with `model: inherit` keep the session's model. See the [Claude Code docs](https://code.claude.com/docs/en/sub-agents.md#run-every-subagent-on-one-model).
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (Claude Code v2.1.257 or later) makes it binding for every subagent, teammate and workflow agent. The Agent tool then takes no `model`; forks and skills with `model: inherit` keep the session's model. See the [Claude Code docs](https://code.claude.com/docs/en/sub-agents.md#run-every-subagent-on-one-model).
 
 A plugin cannot set these for you, so run `/hierarchical-implementation:setup`, optionally with a model, for example `/hierarchical-implementation:setup claude-sonnet-5-5`. It shows the current values, proposes `sonnet`, shows the change and writes the two keys to your user settings only after you say yes.
 
