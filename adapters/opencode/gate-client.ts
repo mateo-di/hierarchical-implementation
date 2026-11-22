@@ -43,6 +43,7 @@ export type OpenCodeGateRuntime = {
   gateScript?: string
   runGate?: GateRunner
   env?: NodeJS.ProcessEnv
+  workerAgents?: readonly string[]
   session: {
     get: (sessionID: string) => Promise<OpenCodeSessionInfo | undefined>
   }
@@ -158,7 +159,14 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
   const baseRunner = runtime.runGate ?? createGateRunner(runtime.gateScript)
   const runGate: GateRunner = (payload) => baseRunner(payload, runtime.env)
   const freeWorkerAgent = (runtime.env?.HI_FREE_AGENT || process.env.HI_FREE_AGENT || "lane-worker").toLowerCase()
+  const customWorkers = new Set(runtime.workerAgents?.map((agent) => agent.toLowerCase()))
   const childWorkerNames = new Map<string, string>()
+
+  function workerType(agent: string): string {
+    const id = agent.toLowerCase()
+    if (UNIT_AGENTS.has(id)) return id
+    return customWorkers.has(id) ? "worker" : agent
+  }
 
   async function resolveRootSession(sessionID: string, eventAgent?: string): Promise<{ cwd: string } | undefined> {
     if (eventAgent && eventAgent.toLowerCase() === freeWorkerAgent) return undefined
@@ -193,6 +201,7 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
       const agent = stringValue(event.input.agent) ?? "general"
       const name = stringValue(event.input.name) ?? stringValue(event.input.description) ?? agent
       const model = workerModelFromInput(event.input)
+      const type = workerType(agent)
       payload = {
         event: "pre_tool",
         harness: "opencode",
@@ -200,7 +209,7 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
         cwd: root.cwd,
         tool: event.tool,
         action: "spawn",
-        worker: { name, type: agent, model, unit: UNIT_AGENTS.has(agent.toLowerCase()) },
+        worker: { name, type, model, unit: UNIT_AGENTS.has(type) },
       }
     }
 
@@ -251,7 +260,7 @@ export async function setupOpenCodeGate(runtime: OpenCodeGateRuntime): Promise<v
         cwd: root.cwd,
         tool: event.tool,
         action: "spawn",
-        worker: { name, type: agent, model },
+        worker: { name, type: workerType(agent), model },
       })
     }
   })

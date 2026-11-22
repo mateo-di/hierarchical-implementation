@@ -13,7 +13,7 @@ import {
   type OpenCodeToolBeforeEvent,
 } from "./gate-client.ts"
 
-function setupFixture() {
+function setupFixture(workerAgents: string[] = []) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hi-opencode-")))
   const root = path.join(tmp, "vscode")
   const repo = path.join(root, "repo")
@@ -44,6 +44,7 @@ function setupFixture() {
   let afterHook: ((event: OpenCodeToolAfterEvent) => Promise<void> | void) | undefined
 
   const ready = setupOpenCodeGate({
+    workerAgents,
     env,
     session: { get: async (id) => sessions.get(id) },
     tool: {
@@ -163,6 +164,26 @@ test("opencode adapter gates multi-file patch payloads and enforces trivial file
       () => fx.before({ tool: "patch", sessionID: "ses_root1", input: { patchText: fourthFilePatch } }),
       /covers up to 3 files/,
     )
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test("opencode counts a configured custom worker but not a read-only specialist", async () => {
+  const fx = setupFixture(["mid.agent"])
+  try {
+    const edit = { tool: "edit", sessionID: "ses_root1", input: { path: "src/a.ts", oldString: "one", newString: "uno" } }
+    const worker = { tool: "subagent", sessionID: "ses_root1", input: { agent: "mid.agent", name: "parser" } }
+    const specialist = { tool: "subagent", sessionID: "ses_root1", input: { agent: "code-reviewer" } }
+    await fx.before(specialist)
+    await assert.rejects(() => fx.before(worker), /Record the decision before the first worker/)
+    fx.decide(fx.repo, "ses_root1", "delegate", "implement parser unit")
+    await fx.after({ ...specialist, status: "completed" })
+    await fx.after({ ...worker, status: "error" })
+    await assert.rejects(() => fx.before(edit), /has not spawned a worker/)
+    await fx.before(worker)
+    await fx.after({ ...worker, status: "completed" })
+    await fx.before(edit)
   } finally {
     fx.cleanup()
   }
