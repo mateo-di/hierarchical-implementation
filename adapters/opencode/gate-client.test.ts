@@ -44,7 +44,7 @@ function setupFixture(workerAgents: string[] = []) {
   let afterHook: ((event: OpenCodeToolAfterEvent) => Promise<void> | void) | undefined
 
   const ready = setupOpenCodeGate({
-    ...{ workerAgents },
+    workerAgents,
     env,
     session: { get: async (id) => sessions.get(id) },
     tool: {
@@ -176,8 +176,10 @@ test("opencode counts a configured custom worker but not a read-only specialist"
     const worker = { tool: "subagent", sessionID: "ses_root1", input: { agent: "mid.agent", name: "parser" } }
     const specialist = { tool: "subagent", sessionID: "ses_root1", input: { agent: "code-reviewer" } }
     await fx.before(specialist)
+    await assert.rejects(() => fx.before(worker), /Record the decision before the first worker/)
     fx.decide(fx.repo, "ses_root1", "delegate", "implement parser unit")
     await fx.after({ ...specialist, status: "completed" })
+    await fx.after({ ...worker, status: "error" })
     await assert.rejects(() => fx.before(edit), /has not spawned a worker/)
     await fx.before(worker)
     await fx.after({ ...worker, status: "completed" })
