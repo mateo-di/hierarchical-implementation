@@ -136,17 +136,19 @@ Set these in the environment Claude Code starts with.
 
 ### Free-model workers (optional)
 
-With `HI_FREE_WORKERS=1` and [opencode](https://opencode.ai) installed, the skill tries each editing unit on a free model first, through `skills/hierarchical-implementation/scripts/free-models.sh`. That script runs a headless `opencode run` in the worktree and records which free models work. A model that fails, or prints nothing for a while (opencode retries rate limits silently), cools down and is retried later. When no free model finishes, the script exits 3 and the driver uses a normal Agent worker. A model the user names runs through `--model`: once, with no cooldown and no fallback, and exit 1 when it cannot run or finish. The hook logs each run as a worker spawn, so it satisfies `delegate`.
+With `HI_FREE_WORKERS=1` and [opencode](https://opencode.ai) installed, the skill tries each editing unit on a free model first, through `skills/hierarchical-implementation/scripts/free-models.sh`. The script runs each attempt through the CLI's ACP server, `opencode acp` or `agy acp`, in the worktree with your own CLI configuration. It uses no flag that approves an action without an answer. It records which free models work. A model that fails, or prints nothing for a while, cools down and is retried later. When no free model finishes, the script exits 3 and the driver uses a normal Agent worker. A model the user names runs through `--model`: once, with no cooldown and no fallback, and exit 1 when it cannot run or finish. The hook logs each run as a worker spawn, so it satisfies `delegate`.
 
-The run approves every permission its opencode agent leaves at "ask", so it needs a restricted agent. Install the example, which denies everything except file tools inside the worktree, git read commands and common test runners:
+The opencode `lane-worker` agent narrows that configuration to what one unit needs. Install the example:
 
 ```bash
 cp examples/opencode-lane-worker.md ~/.config/opencode/agents/lane-worker.md
 ```
 
-Without it the script runs no model and the driver falls back. The agent narrows what the model can call. It is not a sandbox: a test runner executes the repo's code.
+The agent denies commits, pushes and subagents, and turns high-impact commands into asks. Without it the script runs no model and the driver falls back. The agent narrows what the model can call. It is not a sandbox: a test runner executes the repo's code. The worker runs as you, so it can read and write its own run directory; the asks keep a cooperative model from acting unseen, they do not contain a hostile one.
 
-With the Antigravity CLI installed, a model id `agy/<id>`, with `<id>` from `agy models`, runs through a headless `agy -p` instead, on your agy quota rather than a free tier. The rotation tries one only when `HI_FREE_MODELS_PREFER` names it, and `--model agy/<id>` runs one directly. agy runs with your own agy permission settings, not a restricted agent: in Auto mode, its default for headless runs, it approves the commands it judges safe, so the brief's limits are instructions there.
+Every ask stops the run with exit 4 and prints a block with the ask id, run id, model, action, title and input. The driver answers with `free-models.sh answer <run-id> <ask-id> once|reject ["<why>"]`. A rejection sends the reason back to the worker as a follow-up. `free-models.sh wait <run-id>` re-prints a pending ask or waits for the result. `free-models.sh stop <run-id>` ends a pending run.
+
+With the Antigravity CLI installed, a model id `agy/<id>`, with `<id>` from `agy models`, runs through `agy acp` in its Auto mode instead, on your agy quota rather than a free tier. The rotation tries one only when `HI_FREE_MODELS_PREFER` names it, and `--model agy/<id>` runs one directly. Because the worker runs over ACP, commands that Auto mode will not clear reach the driver as asks instead of being refused.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -157,7 +159,9 @@ With the Antigravity CLI installed, a model id `agy/<id>`, with `<id>` from `agy
 | `HI_FREE_MAX_TRIES` | `3` | Models tried per unit before falling back |
 | `HI_FREE_TIMEOUT` | `1800` | Seconds one attempt may take |
 | `HI_FREE_STALL` | `300` | Seconds one attempt may print nothing before it counts as failed |
+| `HI_FREE_ASK_TIMEOUT` | `1800` | Seconds a pending ask waits for an answer before it counts as rejected |
 | `HI_FREE_REGISTRY` | `…/hierarchical-implementation/free-models.json` | Registry under `$XDG_STATE_HOME` |
+| `HI_FREE_RUNS` | `…/hierarchical-implementation/runs` | Directory of run directories, under `$XDG_STATE_HOME` |
 
 Free models come and go, and some providers keep or train on prompts. Check each provider's terms before sending it code.
 
@@ -168,6 +172,7 @@ bash hooks/hierarchical-implementation-gate.test.sh
 bash hooks/multi-cli-gate.test.sh
 node --test adapters/opencode/gate-client.test.ts adapters/omp-pi/gate-client.test.ts
 bash "$PWD/skills/hierarchical-implementation/scripts/free-models.test.sh"
+node --test skills/hierarchical-implementation/scripts/acp-worker.test.mjs
 ```
 
 ## What it does not enforce

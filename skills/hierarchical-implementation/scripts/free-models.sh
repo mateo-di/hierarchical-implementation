@@ -1,64 +1,80 @@
 #!/usr/bin/env bash
 # Free-model workers for the hierarchical-implementation skill. Runs one unit's brief through a
-# headless `opencode run` on a free model, so the worker costs no paid tokens, and keeps a registry
-# of which free models work. A model that fails or stalls cools down and is tried again once the
-# cooldown ends. The list refreshes itself from `opencode models` once a day, and at once when
-# opencode refuses a model as unavailable. A free model is never a blocker: when none finishes
-# the unit, the script exits 3 and the driver falls back to a normal Agent-tool worker. Written
-# for bash 3.2, the macOS default.
+# coding CLI's ACP server with the user's own configuration, on a free model, so the worker costs
+# no paid tokens, and keeps a registry of which free models work. Nothing is approved without an
+# answer: every permission ask stops the run and reaches the driver, which answers it. A model that
+# fails or stalls cools down and is tried again once the cooldown ends. The list refreshes itself
+# from `opencode models` once a day, and at once when the CLI refuses a model as unavailable.
+# A free model is never a blocker: when none finishes the unit, the script exits 3 and the driver
+# falls back to a normal Agent-tool worker. Written for bash 3.2, the macOS default.
 #
 #   free-models.sh run <worktree> <name> <brief-file> [session-id]
 #   free-models.sh run --model <provider/model> <worktree> <name> <brief-file> [session-id]
 #   free-models.sh list
 #   free-models.sh refresh
+#   free-models.sh wait <run-id>
+#   free-models.sh answer <run-id> <ask-id> once|reject ["<why>"]
+#   free-models.sh stop <run-id>
 #
 # run prints `model=<id> session=<id>` and then the worker's final message. A session id continues
 # that worker's session, which is how the driver sends corrections. --model runs one named model
-# with no rotation and no fallback. Exit: 0 finished; 3 fall back to an Agent worker (no free model
-# finished, or the free path is not set up); 1 a wrong call, or the --model model did not run or
-# finish for any reason, since falling back would swap it for another model.
+# with no rotation and no fallback. An ask prints an ask block and exits 4, leaving the worker
+# waiting; the driver answers with `answer`, or uses `wait` to see the ask again and `stop` to end
+# it. Exit: 0 finished; 3 fall back to an Agent worker; 1 a wrong call, or the --model model did not
+# run or finish; 4 the worker asks for a permission, answer it with `answer`.
 #
-# Each run uses the opencode agent HI_FREE_AGENT, which has to deny what a unit does not need:
-# --auto approves everything that agent leaves at "ask". A session on the opencode service keeps
-# working after its client exits, so stopping an attempt interrupts its session through the service
-# API (the id comes from the run's first event) before it stops the client. The id cannot be chosen
-# up front: OpenCode Zen refuses free models with a usage-limit error for an id it did not issue.
-# opencode retries a rate limit without printing anything, so a run silent for HI_FREE_STALL
-# seconds counts as failed.
-#
-# A model id agy/<model> runs through the Antigravity CLI instead, as a headless `agy -p` on that
-# model. It spends the user's agy quota, not a free tier, so the rotation tries one only when
-# HI_FREE_MODELS_PREFER names it. agy runs with the user's own agy settings and no restricted agent:
-# in Auto mode, its default for headless runs, it approves the commands it judges safe, so the
-# brief's limits are instructions there, not rules. The session it prints is its conversation id
-# marked agy:, and a correction with that session runs only on agy models.
+# Each run uses the opencode agent HI_FREE_AGENT. The `lane-worker` example narrows the user's own
+# permissions so a unit's high-impact commands become asks. A model id agy/<model> runs through the
+# Antigravity CLI's ACP server in its Auto mode, on the user's agy quota rather than a free tier, so
+# the rotation tries one only when HI_FREE_MODELS_PREFER names it. Its session is printed marked
+# agy:, and a correction with that session runs only on agy models.
 
 set -u
 REGISTRY="${HI_FREE_REGISTRY:-${XDG_STATE_HOME:-$HOME/.local/state}/hierarchical-implementation/free-models.json}"
+RUNS="${HI_FREE_RUNS:-${XDG_STATE_HOME:-$HOME/.local/state}/hierarchical-implementation/runs}"
 PREFER="${HI_FREE_MODELS_PREFER:-}" # space-separated model ids to try first
 AGENT="${HI_FREE_AGENT:-lane-worker}"
 COOLDOWN="${HI_FREE_COOLDOWN:-3600}" # seconds a failed model is skipped
 MAX_TRIES="${HI_FREE_MAX_TRIES:-3}"  # models tried per run
 TIMEOUT="${HI_FREE_TIMEOUT:-1800}"   # seconds one attempt may take
 STALL="${HI_FREE_STALL:-300}"        # seconds one attempt may print nothing
+ASK_TIMEOUT="${HI_FREE_ASK_TIMEOUT:-1800}" # seconds a pending ask waits for an answer
 OPENCODE="${OPENCODE_BIN:-opencode}"
 AGY="${AGY_BIN:-agy}"
+ACP_WORKER="$(cd "$(dirname "$0")" && pwd -P)/acp-worker.mjs"
 REFRESH_EVERY=86400
 MESSAGE="Execute the unit in the attached brief."
 RETRY_NOTE="An earlier attempt on another model stopped partway. Check git status and git diff for the files the brief names, and continue from what is there. "
-CHILD="" OUT="" ATT="" # the running attempt's client pid, its event output, and agy's copy of the brief
-trap '[[ -n $CHILD ]] && halt; rm -f "$ATT"; exit 143' TERM INT HUP
+EXPLICIT="" # the model --model named, which is never swapped for another
+WAITING_RUN="" # the run dir this process is waiting on; a signal stops it
+ASK_ID_RE='^a[0-9a-f]{16}$'
+NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$' # run ids and names become path components
+trap '[[ -n $WAITING_RUN ]] && : >"$WAITING_RUN/stop"; exit 143' TERM INT HUP
 
 usage() {
   cat >&2 <<'EOF'
 usage: free-models.sh run [--model <provider/model> | --model agy/<model>] <worktree> <name> <brief-file> [session-id]
        free-models.sh list
        free-models.sh refresh
+       free-models.sh wait <run-id>
+       free-models.sh answer <run-id> <ask-id> once|reject ["<why>"]
+       free-models.sh stop <run-id>
 EOF
   exit 1
 }
 
-EXPLICIT="" # the model --model named, which is never swapped for another
+valid_name() { # valid_name <what> <value>: a wrong call unless the value is safe inside a path
+  [[ $2 =~ $NAME_RE ]] || { echo "free-models: invalid $1 '$2'" >&2; return 1; }
+}
+
+clip() { # clip <text> <max>: cut text is marked, so padding cannot hide the tail of an action
+  local text=$1 max=$2
+  if ((${#text} > max)); then
+    printf '%s [cut: %d more characters]' "${text:0:max}" $((${#text} - max))
+  else
+    printf '%s' "$text"
+  fi
+}
 
 fallback() { # fallback <why>: exit 3 sends the driver to an Agent worker; a named model exits 1 instead
   if [[ -n $EXPLICIT ]]; then
@@ -138,85 +154,134 @@ mark() { # mark <model> ok|fail [error]
     --arg id "$1" --arg r "$2" --arg e "${3:-}" --argjson c "$COOLDOWN"
 }
 
-session_id() { jq -rR 'fromjson? | .sessionID // empty' <"$OUT" | head -n 1; }
-
-# interrupts the running attempt's session on the opencode service, then stops its client (KILL after
-# 10s). agy has no service: stopping its client stopped the command it was running, when tried.
-halt() {
-  local i sid
-  sid=$(session_id)
-  [[ -n $sid ]] && bounded 15 "$OPENCODE" api session.interrupt --param sessionID="$sid" >/dev/null 2>&1
-  kill -TERM "$CHILD" 2>/dev/null
-  for ((i = 0; i < 10; i++)); do
-    kill -0 "$CHILD" 2>/dev/null || return 0
-    sleep 1
-  done
-  kill -KILL "$CHILD" 2>/dev/null
+print_ask() { # print_ask <run-dir> <model> <ask-json>: prints the pending ask for the driver and returns 4
+  local dir=$1 model=$2 ask=$3 id kind title input req backend sid run_id
+  id=$(jq -r '.id // ""' <<<"$ask")
+  [[ $id =~ $ASK_ID_RE ]] || { fail_run "$model" "invalid ask id" "$dir"; return 1; }
+  # a model-supplied title can contain newlines that look like lines of this block
+  kind=$(jq -r '.kind // "" | gsub("[\u0000-\u001f\u007f]+"; " ")' <<<"$ask")
+  title=$(clip "$(jq -r '.title // "" | gsub("[\u0000-\u001f\u007f]+"; " ")' <<<"$ask")" 300)
+  input=$(clip "$(jq -c '.rawInput // {}' <<<"$ask")" 2000)
+  req=$(cat "$dir/request.json")
+  backend=$(jq -r '.backend // "opencode"' <<<"$req")
+  sid=$(cat "$dir/session" 2>/dev/null || jq -r '.session // ""' <<<"$req")
+  [[ $backend == agy && -n $sid ]] && sid="agy:$sid"
+  run_id=${dir##*/}
+  printf 'ask=%s run=%s model=%s session=%s\n' "$id" "$run_id" "$model" "$sid"
+  printf 'action: %s\n' "$kind"
+  printf 'title: %s\n' "$title"
+  printf 'input: %s\n' "$input"
+  printf 'answer: free-models.sh answer %s %s once|reject ["<why>"]\n' "$run_id" "$id"
+  return 4
 }
 
-attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: prints the result, or sets err and returns 1 (the model failed) or 2 (a local problem)
-  local log rc size=0 now started=$SECONDS last=$SECONDS sid text tool
-  local -a cmd
-  tool=$(backend "$1") ATT=""
-  if [[ $tool == agy ]]; then
-    command -v "$AGY" >/dev/null 2>&1 || { err="agy is not installed"; return 2; }
-    # @<path> in the prompt attaches a file but ends at whitespace, so agy gets a copy at a plain path
-    ATT=$(mktemp /tmp/free-models-brief.XXXXXX) && cp "$4" "$ATT" || { rm -f "$ATT"; err="cannot copy the brief for agy"; return 2; }
-    # the prompt runs as written, with no slash command or skill expansion
-    cmd=("$AGY" --model "${1#agy/}" --disable-slash-commands --output-format stream-json)
-    [[ -n ${6:-} ]] && cmd+=(--conversation "${6#agy:}")
-    cmd+=(-p "$5$MESSAGE @$ATT")
-  else
-    cmd=("$OPENCODE" run --auto --agent "$AGENT" --format json -m "$1" --title "$3" -f "$4")
-    [[ -n ${6:-} ]] && cmd+=(--session "$6")
-    cmd+=("$5$MESSAGE")
-  fi
-  OUT=$(mktemp) log=$(mktemp)
-  (cd "$2" && exec "${cmd[@]}") >"$OUT" 2>"$log" </dev/null &
-  CHILD=$!
+worker_gone() { # worker_gone <run-dir>: true when the acp worker died without writing a result
+  local pid
+  [[ -f $1/result.json || ! -f $1/pid ]] && return 1
+  pid=$(cat "$1/pid")
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
+stopped_run() { # stopped_run <run-id>: a stopped run ends every waiter with code 5
+  echo "free-models: run $1 stopped" >&2
+  err=stopped
+  WAITING_RUN=""
+  return 5
+}
+
+fail_run() { # fail_run <model> <message> <run-dir>: reports a run failure, sets err and removes the run
+  err=$2
+  echo "free-models: $1 failed: $err" >&2
+  WAITING_RUN=""
+  : >"$3/stop"
+  rm -rf "$3"
+  return 1
+}
+
+wait_run() { # wait_run <run-dir> <model>: polls one run; 0 done, 1 failure, 2 setup, 4 ask, 5 stopped
+  local dir=$1 model=$2 state="" req backend result kind sid text ask
+  local started=$(date +%s)
+  req=$(jq -c . "$dir/request.json")
+  backend=$(jq -r '.backend // "opencode"' <<<"$req")
   err=""
-  while kill -0 "$CHILD" 2>/dev/null; do
-    sleep 1
-    now=$(wc -c <"$OUT")
-    if ((now != size)); then size=$now last=$SECONDS; fi
-    if ((SECONDS - started >= TIMEOUT)); then
-      err="timed out after ${TIMEOUT}s"
-    elif ((SECONDS - last >= STALL)); then
-      err="printed nothing for ${STALL}s (rate limited or stuck)"
-    else
+  WAITING_RUN=$dir
+  while :; do
+    [[ -d $dir ]] || { stopped_run "${dir##*/}"; return 5; }
+    # the worker writes the result before the state, so a result is final whatever the state says
+    if [[ -f $dir/result.json ]]; then
+      result=$(cat "$dir/result.json")
+      err=$(jq -r '.error // ""' <<<"$result")
+      [[ $err == stopped ]] && { stopped_run "${dir##*/}"; return 5; }
+      kind=$(jq -r '.kind // ""' <<<"$result")
+      text=$(jq -r '.text // ""' <<<"$result")
+      if [[ -n $err ]]; then
+        WAITING_RUN=""
+        rm -rf "$dir"
+        if [[ $kind == setup ]]; then
+          if [[ $backend == opencode && $err == "mode "*" is not offered" ]]; then
+            err="opencode has no agent named $AGENT; install the worker agent from the plugin's examples"
+          fi
+          return 2
+        fi
+        echo "free-models: $model failed: $err" >&2
+        return 1
+      fi
+      sid=$(cat "$dir/session" 2>/dev/null || true)
+      [[ $backend == agy && -n $sid ]] && sid="agy:$sid"
+      WAITING_RUN=""
+      rm -rf "$dir"
+      printf 'model=%s session=%s\n%s\n' "$model" "$sid" "$text"
+      return 0
+    fi
+    if [[ ! -f $dir/state ]]; then
+      if worker_gone "$dir"; then fail_run "$model" "acp worker exited without a result" "$dir"; return 1; fi
+      if (( $(date +%s) - started >= 30 )); then fail_run "$model" "acp worker did not start" "$dir"; return 1; fi
+      sleep 1
       continue
     fi
-    halt
-    break
+    state=$(cat "$dir/state" 2>/dev/null || true)
+    if worker_gone "$dir"; then fail_run "$model" "acp worker exited without a result" "$dir"; return 1; fi
+    if [[ $state == ask ]]; then
+      # the worker removes ask.json just before it leaves the ask state, and stop removes the dir
+      if ask=$(cat "$dir/ask.json" 2>/dev/null); then
+        print_ask "$dir" "$model" "$ask"
+        return $?
+      fi
+    fi
+    sleep 1
   done
-  wait "$CHILD"
-  rc=$?
-  CHILD=""
-  if [[ $tool == agy ]]; then # an init event with the conversation id, step updates, then one result
-    sid=$(jq -rR 'fromjson? | .conversation_id // empty' <"$OUT" | head -n 1)
-    [[ -n $sid ]] && sid="agy:$sid" # marks the session as agy's, so a correction stays on agy
-    [[ -n $err ]] || err=$(jq -rR 'fromjson? | .result // empty
-      | select(.status != "SUCCESS" or .finished_reason) | .error // .finished_reason // .status // "no status"' <"$OUT" | head -n 1)
-    text=$(jq -rR 'fromjson? | .result.response // empty' <"$OUT")
+}
+
+attempt() { # attempt <model> <worktree> <name> <brief-file> <note> [session]: launches a run and reports it
+  local tool cmd mode model session cwd run_dir explicit
+  tool=$(backend "$1")
+  if [[ $tool == agy ]]; then
+    command -v "$AGY" >/dev/null 2>&1 || { err="agy is not installed"; return 2; }
+    cmd=$AGY mode=auto model=${1#agy/}
   else
-    sid=$(session_id)
-    [[ -n $err ]] || err=$(jq -rR 'fromjson? | select(.type == "error") | .error.message // .error.type // "error"' <"$OUT" | head -n 1)
-    text=$(jq -rRs '[split("\n")[] | fromjson? | select(.type == "text")]
-      | if length == 0 then "" else last.part.messageID as $m | map(select(.part.messageID == $m) | .part.text) | join("\n") end' <"$OUT")
+    cmd=$OPENCODE mode=$AGENT model=$1
   fi
-  if [[ -z $err && $rc -ne 0 ]]; then err=$(tail -n 1 "$log"); fi
-  if [[ -z $err && $rc -ne 0 ]]; then err="$tool exited $rc"; fi
-  if [[ -z $err && -z $text ]]; then err="no reply"; fi
-  rm -f "$OUT" "$log" "$ATT"
-  if [[ $err == *"Agent not found"* ]]; then
-    err="opencode has no agent named $AGENT; install the restricted agent from the plugin's examples"
-    return 2
-  fi
-  if [[ -n $err ]]; then
-    echo "free-models: $1 failed: $err" >&2
-    return 1
-  fi
-  printf 'model=%s session=%s\n%s\n' "$1" "$sid" "$text"
+  session=${6:-}
+  session=${session#agy:}
+  cwd=$(cd "$2" && pwd -P) || { err="cannot enter the worktree"; return 2; }
+  if [[ -n $EXPLICIT ]]; then explicit=true; else explicit=false; fi
+  mkdir -p "$RUNS" || { err="cannot create the runs directory"; return 2; }
+  run_dir=$(mktemp -d "$RUNS/$3-XXXXXX") || { err="cannot create a run directory"; return 2; }
+  jq -n \
+    --arg cmd "$cmd" --arg mode "$mode" --arg model "$model" \
+    --arg cwd "$cwd" --arg brief "$4" --arg message "$5$MESSAGE" \
+    --arg session "$session" --argjson timeout "$TIMEOUT" --argjson stall "$STALL" \
+    --argjson askTimeout "$ASK_TIMEOUT" --argjson explicit "$explicit" --arg backend "$tool" \
+    '{command: [$cmd, "acp"], cwd: $cwd, model: $model, mode: $mode, brief: $brief,
+      message: $message, session: $session, timeout: $timeout, stall: $stall,
+      askTimeout: $askTimeout, explicit: $explicit, backend: $backend}' >"$run_dir/request.json" || {
+      err="cannot write the request"; rm -rf "$run_dir"; return 2;
+    }
+  node "$ACP_WORKER" launch "$run_dir" >/dev/null || {
+    err="cannot start the acp worker"; rm -rf "$run_dir"; return 2;
+  }
+  wait_run "$run_dir" "$1"
 }
 
 run() {
@@ -226,11 +291,13 @@ run() {
     [[ -n $EXPLICIT && $EXPLICIT != agy/ ]] || usage
     shift 2
   fi
-  for v in COOLDOWN MAX_TRIES TIMEOUT STALL; do
+  for v in COOLDOWN MAX_TRIES TIMEOUT STALL ASK_TIMEOUT; do
     [[ ${!v} =~ ^[0-9]+$ ]] || fallback "HI_FREE_$v must be a whole number, not '${!v}'"
   done
   [[ $# -ge 3 && $# -le 4 && -d $1 && -f $3 ]] || usage
+  valid_name "run name" "$2" || exit 1
   [[ $(backend "$EXPLICIT") == agy ]] || command -v "$OPENCODE" >/dev/null 2>&1 || fallback "opencode is not installed"
+  command -v node >/dev/null 2>&1 || fallback "node is not installed"
   local wt=$1 name=$2 brief session=${4:-}
   brief="$(cd "$(dirname "$3")" && pwd -P)/$(basename "$3")" # the worker runs in the worktree
   if [[ -n $EXPLICIT ]]; then
@@ -242,6 +309,8 @@ run() {
     case $? in
       0) return 0 ;;
       2) fallback "$err" ;;
+      4) exit 4 ;;
+      5) exit 3 ;; # a stopped run ends this run with no rotation and no fallback message
     esac
     return 1
   fi
@@ -262,6 +331,8 @@ run() {
     case $? in
       0) mark "$model" ok; return 0 ;;
       2) fallback "$err" ;;
+      4) exit 4 ;;
+      5) exit 3 ;;
     esac
     # opencode refused the model before it ran, so its list may have changed since the daily
     # refresh: re-read it, once per run even when the read fails. A model it no longer offers leaves
@@ -277,6 +348,78 @@ run() {
   fallback "no free model finished the unit"
 }
 
+wait_cmd() { # wait_cmd <run-id>: continues a run; sets the registry from its result
+  local id=${1:-} dir req model backend explicit
+  [[ -n $id ]] || usage
+  valid_name "run id" "$id" || return 1
+  dir="$RUNS/$id"
+  [[ -d $dir ]] || { echo "free-models: no run $id" >&2; return 1; }
+  req=$(cat "$dir/request.json")
+  model=$(jq -r '.model // ""' <<<"$req")
+  backend=$(jq -r '.backend // "opencode"' <<<"$req")
+  [[ $backend == agy ]] && model="agy/$model"
+  explicit=$(jq -r '.explicit // false' <<<"$req")
+  [[ $explicit == true ]] && EXPLICIT=$model
+  wait_run "$dir" "$model"
+  case $? in
+    0) [[ $explicit == true ]] || mark "$model" ok; return 0 ;;
+    1) [[ $explicit == true ]] || mark "$model" fail "$err"; fallback "$err" ;;
+    2) fallback "$err" ;;
+    4) return 4 ;;
+    5) exit 3 ;;
+  esac
+}
+
+answer_cmd() { # answer_cmd <run-id> <ask-id> once|reject [message]: answers a pending ask, then continues like wait
+  local id=${1:-} ask_id=${2:-} decision=${3:-} message=${4:-} dir state tmp
+  [[ -n $id && -n $ask_id && ( $decision == once || $decision == reject ) ]] || usage
+  valid_name "run id" "$id" || return 1
+  [[ $ask_id =~ $ASK_ID_RE ]] || { echo "free-models: invalid ask id '$ask_id'" >&2; return 1; }
+  dir="$RUNS/$id"
+  [[ -d $dir ]] || { echo "free-models: no run $id" >&2; return 1; }
+  state=$(cat "$dir/state" 2>/dev/null || true)
+  [[ $state == ask ]] || { echo "free-models: run $id has no pending ask" >&2; return 1; }
+  [[ -f $dir/ask.json && $(jq -r '.id // ""' "$dir/ask.json") == "$ask_id" ]] || {
+    echo "free-models: run $id has no ask $ask_id" >&2; return 1;
+  }
+  tmp=$(mktemp "$dir/answer.XXXXXX") || { echo "free-models: cannot write the answer" >&2; return 1; }
+  if jq -n --arg id "$ask_id" --arg decision "$decision" --arg message "$message" \
+    '{id: $id, decision: $decision, message: $message}' >"$tmp" && mv "$tmp" "$dir/answer.json"; then
+    :
+  else
+    rm -f "$tmp"
+    echo "free-models: cannot write the answer" >&2
+    return 1
+  fi
+  while :; do
+    [[ -d $dir ]] || { stopped_run "$id"; exit 3; }
+    worker_gone "$dir" && break # wait_cmd reports the dead worker
+    [[ -f $dir/state ]] || break
+    state=$(cat "$dir/state")
+    [[ $state != ask ]] && break
+    [[ -f $dir/ask.json && $(jq -r '.id // ""' "$dir/ask.json") != "$ask_id" ]] && break
+    sleep 1
+  done
+  wait_cmd "$id"
+}
+
+stop_cmd() { # stop_cmd <run-id>: stops a pending run and removes its dir, without marking a model
+  local id=${1:-} dir i
+  [[ -n $id ]] || usage
+  valid_name "run id" "$id" || return 1
+  dir="$RUNS/$id"
+  [[ -d $dir ]] || { echo "free-models: no run $id" >&2; return 1; }
+  : >"$dir/stop"
+  for ((i = 0; i < 20; i++)); do
+    [[ -f $dir/result.json ]] && break
+    worker_gone "$dir" && break
+    sleep 1
+  done
+  rm -rf "$dir"
+  echo "free-models: run $id stopped" >&2
+  return 0
+}
+
 list() {
   registry | jq -r '.models | to_entries[]
     | [.key, (if (.value.cooldown_until // 0) > now then "cooling down" else "ready" end), (.value.last_error // "")]
@@ -287,5 +430,8 @@ case ${1:-} in
   run) shift; run "$@" ;;
   list) list ;;
   refresh) refresh ;;
+  wait) shift; wait_cmd "$@" ;;
+  answer) shift; answer_cmd "$@" ;;
+  stop) shift; stop_cmd "$@" ;;
   *) usage ;;
 esac
