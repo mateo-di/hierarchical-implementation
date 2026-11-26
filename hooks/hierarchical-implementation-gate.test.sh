@@ -427,7 +427,7 @@ check none "free-first: a run with a quoted unit name is logged" "$(free "free-m
 fcheck none "free-first: a quoted unit name matches the worker's name" "$(tool PreToolUse Agent sf1 "$(fw lexer)")"
 fcheck deny "free-first: an events log in a directory not created yet still asks" "$(tool PreToolUse Agent sf1 "$(fw parser)")" DELEGATION_EVENTS="$T/new-events/events.tsv"
 got=$(env HI_FREE_WORKERS=1 OPENCODE_BIN="$T/bin/opencode" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 bash "$HOOK" <<<"$(tool PreToolUse Agent sf2 '{"name":"lexer","prompt":"x","subagent_type":"worker"}')" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-[[ $got == "Free-model workers are on"* && $got == *"not available while CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on." ]] && pass "free-first: with the subagent model forced, a worker with no model still waits for a free run, and a named model is unavailable" || fail "free-first forced: $got"
+[[ $got == "Free-model workers are on"* && $got == *"run a Claude model as its own Claude Code session"* ]] && pass "free-first: with the subagent model forced, a worker with no model still waits for a free run, and a named Claude model runs as its own session" || fail "free-first forced: $got"
 fcheck none "free-first: with the subagent model forced, a worker with no model starts after its run" "$(tool PreToolUse Agent sf1 '{"name":"lexer","prompt":"x","subagent_type":"worker"}')" CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1
 grep -q $'\tsf1\tdeny\tAgent\t\tfree-first$' "$DELEGATION_EVENTS" && pass "free-first: a denial is logged with its kind" || fail "free-first deny events: $(grep sf1 "$DELEGATION_EVENTS")"
 start() { jq -cn '{hook_event_name:"SessionStart",session_id:"ss1",cwd:"/",source:"startup"}'; }
