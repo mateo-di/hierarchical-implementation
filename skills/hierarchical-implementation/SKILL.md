@@ -46,8 +46,8 @@ file and shell tools that starts with about a third of a general-purpose agent's
 plugin's agent is unavailable. On Bedrock or Vertex, check that the alias resolves to the
 intended model version; if it does not, ask the user which worker model to use. An Agent tool
 with no `model` parameter means `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` is on and every subagent runs
-the model it sets: leave `model` out, and tell the user that a council or an Agent model they
-named is not available.
+the model it sets: leave `model` out, and tell the user that a council is not available. A Claude
+model they named then runs as its own Claude Code session (below).
 
 1. **Split and brief.** Explore only as far as the brief needs, then hand off; settle a costly
    design choice no test can decide with a council (below) first. One worker per independently
@@ -117,12 +117,18 @@ before an Agent worker, except in a `LANE_MODE=driver` session. A session-start 
 is on; `printenv HI_FREE_WORKERS` checks it. Then read `references/free-models.md` in this skill's
 directory before the first brief: the gate refuses the plugin's worker on sonnet until a
 free-model run under the unit's name was tried. Read it too when the user names a worker model
-that is not an Agent tool alias. When the user names a
-model ("use fable for this unit", "run the parser on gpt-6-sol"): an Agent tool alias runs as an
-Agent worker with that model; a model only `opencode models` lists, or one `agy models` lists as
-`agy/<id>`, runs through that reference's `--model` path, with no rotation and no fallback; for
-neither, tell the user it is unavailable
-and ask. Never substitute another model.
+that is not a Claude model. When the user names a model ("use fable for this unit", "run the
+parser on gpt-6-sol"):
+
+- A Claude model (`fable`, `opus`, `sonnet`, `haiku` or a `claude-*` id) always runs in a Claude
+  Code session: an Agent worker with that `model`, or, while `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` is
+  on, a separate Claude Code session started on it, such as a lane spawner's unit lane with the
+  `claude` agent and `--model <id>`. Never route it through `free-models.sh`: opencode's
+  `anthropic/*` provider and agy reach Claude with their own keys and quotas, outside the user's
+  Claude Code login, hooks and gate.
+- Any other model that `opencode models` lists, or that `agy models` lists as `agy/<id>`, runs
+  through that reference's `--model` path, with no rotation and no fallback.
+- For neither, tell the user it is unavailable and ask. Never substitute another model.
 
 ## Harness tool mapping
 

@@ -69,3 +69,8 @@ A model that `opencode models` lists, or one `agy models` lists written as `agy/
 not an Agent tool alias, runs with
 `free-models.sh run --model <provider/model> <worktree> <name> <brief-file>`. It runs only that
 model, with no rotation, no cooldown and no fallback.
+
+A Claude model is never one of these, even when `opencode models` lists it as `anthropic/<id>`
+or `agy models` lists it: it runs in a Claude Code session, as the skill says. opencode's
+`anthropic` provider needs its own API key (without one it fails with `x-api-key header is
+required`), and neither CLI runs under the user's Claude Code login, hooks or gate.

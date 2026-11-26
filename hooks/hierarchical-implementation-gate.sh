@@ -415,7 +415,7 @@ free_first() { # free_first [worker_name] [worker_model] -> prints a deny when f
     END { exit !f }' "$DELEGATION_EVENTS" 2>/dev/null && return 0
   script=${SELF%/hooks/*}/skills/hierarchical-implementation/scripts/free-models.sh
   [[ -f $script ]] || script="the skill's scripts/free-models.sh"
-  subagent_model_forced && named="If the user named this worker's model, tell them it is not available while CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on."
+  subagent_model_forced && named="If the user named this worker's model, it cannot run as an Agent worker while CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on: run a Claude model as its own Claude Code session and any other through free-models.sh --model, as the skill says."
   deny free-first "Free-model workers are on (HI_FREE_WORKERS=1), so each editing unit tries a free model before an Agent worker. Read references/free-models.md in the hierarchical-implementation skill, write the brief to a file outside the worktree, and run $script run <worktree> ${name:-<unit name>} <brief-file> with run_in_background. If it exits 3, retry this spawn with name set to the same unit name, or that name plus a dash and a suffix for a redo. $named"
 }
 
