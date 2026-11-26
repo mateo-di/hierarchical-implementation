@@ -123,7 +123,11 @@ parser on gpt-6-sol"):
 - A Claude model (`fable`, `opus`, `sonnet`, `haiku` or a `claude-*` id) always runs in a Claude
   Code session: an Agent worker with that `model`, or, while `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` is
   on, a separate Claude Code session started on it, such as a lane spawner's unit lane with the
-  `claude` agent and `--model <id>`. Never route it through `free-models.sh`: opencode's
+  `claude` agent and `--model <id>`. Only a session that may start sessions does this; a
+  `LANE_MODE=driver` lane or a worker tells the user it is unavailable. The gate does not log that
+  lane as a worker: the lane records `lane` itself and commits on its own branch, and the driver
+  reviews it, merges the branch with git and sends any correction back to the lane instead of
+  editing it. Never route it through `free-models.sh`: opencode's
   `anthropic/*` provider and agy reach Claude with their own keys and quotas, outside the user's
   Claude Code login, hooks and gate.
 - Any other model that `opencode models` lists, or that `agy models` lists as `agy/<id>`, runs
