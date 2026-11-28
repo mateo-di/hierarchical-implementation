@@ -134,6 +134,13 @@ parser on gpt-6-sol"):
   through that reference's `--model` path, with no rotation and no fallback.
 - For neither, tell the user it is unavailable and ask. Never substitute another model.
 
+## Optional Codex unit lane
+
+If the user explicitly selects an external Codex worker on Linux, see the
+[supervised Codex relay lane](references/codex-relay-lane.md). It uses the existing `lane`
+decision, which the coordinator records for the separate Codex thread. Native and ACP workers
+remain the defaults.
+
 ## Harness tool mapping
 
 The procedure above is written in Claude Code's tool names. On other CLIs, use the matching
